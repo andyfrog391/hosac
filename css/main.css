@@ -548,3 +548,52 @@ body.night-mode #gps-refresh-btn {
     grid-column: 1 / -1;
     margin: 3px 0 !important;
 }
+
+/* ------------------------------------------------------------------
+   Night mode layout: star map on top (fills the panel), controls below
+   ------------------------------------------------------------------ */
+
+/* In night mode the aircraft map moves to the left panel, which leaves the
+   day slot empty. It must not take any of the space. */
+body.night-mode #day-aircraft-slot {
+    display: none;
+}
+
+#astronomy-container {
+    flex: 1 1 0;
+    min-height: 0;
+}
+
+#astronomy-meta {
+    order: 0;
+    flex: none;
+    padding: 4px 10px;
+    margin-bottom: 6px;
+    font-size: 12px;
+}
+
+#starmap {
+    order: 1;
+    flex: 1 1 0;
+    min-height: 160px;
+    margin-bottom: 6px;
+}
+
+#astronomy-hud {
+    order: 2;
+    flex: none;
+    margin-bottom: 0;
+    padding: 6px 8px;
+    gap: 6px;
+}
+
+#astro-target-chips {
+    scrollbar-width: thin;
+}
+
+#astro-brief {
+    padding: 6px 8px;
+    min-height: 56px;
+    max-height: 96px;
+    overflow-y: auto;
+}

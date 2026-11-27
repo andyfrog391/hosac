@@ -106,7 +106,7 @@ const CONSTELLATION_TARGETS = [
         name: "Orion",
         category: "constellation",
         icon: "🏹",
-        image: "images/astronomy/constellations/orion.jpg",
+        image: "https://upload.wikimedia.org/wikipedia/commons/thumb/b/bf/Orion_IAU.svg/480px-Orion_IAU.svg.png",
         raDeg: 83.5,
         decDeg: 2.0,
         visibleFeatures: "Betelgeuse, Rigel, Orion Nebula",
@@ -118,7 +118,7 @@ const CONSTELLATION_TARGETS = [
         name: "Taurus",
         category: "constellation",
         icon: "🐂",
-        image: "images/astronomy/constellations/taurus.jpg",
+        image: "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e9/Taurus_IAU.svg/480px-Taurus_IAU.svg.png",
         raDeg: 74.0,
         decDeg: 18.5,
         visibleFeatures: "Aldebaran, Hyades, Pleiades",
@@ -130,7 +130,7 @@ const CONSTELLATION_TARGETS = [
         name: "Ursa Major / Plough",
         category: "constellation",
         icon: "🐻",
-        image: "images/astronomy/constellations/ursa-major.jpg",
+        image: "https://upload.wikimedia.org/wikipedia/commons/thumb/1/13/Ursa_Major_IAU.svg/480px-Ursa_Major_IAU.svg.png",
         raDeg: 165.0,
         decDeg: 56.0,
         visibleFeatures: "The Plough, Dubhe & Merak pointers, Mizar & Alcor",
@@ -142,7 +142,7 @@ const CONSTELLATION_TARGETS = [
         name: "Cassiopeia",
         category: "constellation",
         icon: "👑",
-        image: "images/astronomy/constellations/cassiopeia.jpg",
+        image: "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e7/Cassiopeia_IAU.svg/480px-Cassiopeia_IAU.svg.png",
         raDeg: 18.0,
         decDeg: 60.5,
         visibleFeatures: "Five-star 'W' asterism, Milky Way band, Double Cluster",
@@ -154,7 +154,7 @@ const CONSTELLATION_TARGETS = [
         name: "Cygnus",
         category: "constellation",
         icon: "🦢",
-        image: "images/astronomy/constellations/cygnus.jpg",
+        image: "https://upload.wikimedia.org/wikipedia/commons/thumb/3/38/Cygnus_IAU.svg/480px-Cygnus_IAU.svg.png",
         raDeg: 308.0,
         decDeg: 42.0,
         visibleFeatures: "Deneb, Albireo, Northern Cross",
@@ -507,7 +507,6 @@ function renderObservationBrief(target) {
     const briefContainer = document.getElementById("astro-brief");
     if (!briefContainer || !target) return;
 
-    // Prevent vertical box jump/anchor shifting during content updates
     briefContainer.style.overflowAnchor = "none";
 
     const altDisplay = `${Math.round(target.alt)}°`;
@@ -515,8 +514,13 @@ function renderObservationBrief(target) {
         ? `<span class="astro-status-up">● ${target.visibilityRating}</span>`
         : `<span class="astro-status-low">○ ${target.visibilityRating}</span>`;
 
+    const imgStyle =
+        target.category === "constellation"
+            ? "display:block;flex-shrink:0;filter:invert(0.92) hue-rotate(180deg) saturate(1.4);"
+            : "display:block;flex-shrink:0;";
+
     const imgHtml = target.image
-        ? `<img class="astro-card-img" src="${target.image}" alt="${target.name}" style="display:block;flex-shrink:0;" onerror="handleAstroCardImageError(this, '${target.name.replace(/'/g, "\\'")}', '${target.icon}')">`
+        ? `<img class="astro-card-img" src="${target.image}" alt="${target.name}" style="${imgStyle}" onerror="handleAstroCardImageError(this, '${target.name.replace(/'/g, "\\'")}', '${target.icon}')">`
         : `<div class="astro-card-img astro-card-img-fallback" style="display:flex;align-items:center;justify-content:center;min-width:110px;min-height:90px;font-size:24px;">${target.icon}</div>`;
 
     if (target.category === "constellation") {

@@ -246,28 +246,31 @@ async function acxFetchRoute(ac) {
     let result = null;
     let networkOk = false;
 
-    // 1) adsb.lol route set
+    // 1) adsbdb.com (allows requests from web pages)
     try {
-        const r = await fetch("https://api.adsb.lol/api/0/routeset", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ planes: [{ callsign, lat: ac.lat, lng: ac.lon }] })
-        });
+        const r = await fetch(`https://api.adsbdb.com/v0/callsign/${encodeURIComponent(callsign)}`);
         if (r.ok) {
             networkOk = true;
             const d = await r.json();
-            const e = Array.isArray(d) ? d[0] : null;
-            const a = e && Array.isArray(e._airports) ? e._airports : [];
-            if (a.length >= 2 && e.plausible !== false) {
-                const o = a[0], x = a[a.length - 1];
+            const fr = d && d.response && d.response.flightroute;
+            if (fr && fr.origin && fr.destination) {
                 result = {
-                    from: { code: o.iata || o.icao, name: o.location || o.name },
-                    to: { code: x.iata || x.icao, name: x.location || x.name }
+                    from: {
+                        code: fr.origin.iata_code || fr.origin.icao_code,
+                        name: fr.origin.municipality || fr.origin.name
+                    },
+                    to: {
+                        code: fr.destination.iata_code || fr.destination.icao_code,
+                        name: fr.destination.municipality || fr.destination.name
+                    },
+                    airline: fr.airline && fr.airline.name ? fr.airline.name : ""
                 };
             }
+        } else if (r.status === 404) {
+            networkOk = true; // reachable, just no route on file
         }
     } catch (err) {
-        console.log("[Card] adsb.lol route error:", err);
+        console.log("[Card] adsbdb route error:", err);
     }
 
     // 2) hexdb.io fallback
@@ -633,7 +636,7 @@ function updateAircraftCard() {
         document.getElementById("acx-flight").parentElement.style.display = "none";
     }
 
-    const airline = acxAirlineName(ac);
+    const airline = acxAirlineName(ac) || (route && route.airline) || "";
     const type = ac.desc ? acxTitleCase(ac.desc).replace(/\bBoeing\b/, "Boeing") : (ac.t || "");
     const desc = [airline, type, reg].filter(Boolean).join(", ");
     document.getElementById("acx-desc").textContent = desc || (ac.hex ? "ICAO " + String(ac.hex).toUpperCase() : "");

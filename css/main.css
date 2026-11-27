@@ -597,3 +597,219 @@ body.night-mode #day-aircraft-slot {
     max-height: 96px;
     overflow-y: auto;
 }
+
+/* ------------------------------------------------------------------
+   Night mode v2: big star map, info card on top of it, tidy left panel
+   ------------------------------------------------------------------ */
+
+/* --- Right panel: map fills everything the controls don't use --- */
+
+body.night-mode #right-panel-title {
+    display: none;
+}
+
+body.night-mode .aircraft {
+    padding: 8px;
+}
+
+#starmap-stage {
+    order: 1;
+    flex: 1 1 0;
+    min-height: 0;
+    position: relative;
+    margin-bottom: 6px;
+    border: 1px solid #5a1a1a;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #05070a;
+}
+
+/* VirtualSky forces position:relative on its container, so !important */
+#starmap-stage #starmap {
+    position: absolute !important;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    min-height: 0;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    flex: none;
+}
+
+/* Observation info card floats over the map, only when an item is selected */
+#starmap-stage #astro-brief {
+    display: none;
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 5;
+    width: min(32%, 300px);
+    min-height: 0;
+    max-height: calc(100% - 16px);
+    overflow-y: auto;
+    background: rgba(11, 14, 20, 0.9);
+}
+
+#starmap-stage #astro-brief.has-target {
+    display: block;
+}
+
+#starmap-stage .astro-brief-grid {
+    grid-template-columns: 1fr;
+    gap: 4px;
+}
+
+.astro-brief-close {
+    background: #7f1d1d;
+    color: #fff;
+    border: 0;
+    border-radius: 4px;
+    padding: 1px 7px;
+    margin-left: 6px;
+    cursor: pointer;
+    font-size: 12px;
+}
+
+#astro-map-note {
+    display: none;
+    position: absolute;
+    left: 50%;
+    bottom: 10px;
+    transform: translateX(-50%);
+    z-index: 5;
+    max-width: 90%;
+    padding: 4px 12px;
+    border-radius: 999px;
+    background: rgba(11, 14, 20, 0.85);
+    color: #fca5a5;
+    font-size: 12px;
+    text-align: center;
+}
+
+/* --- Bottom row: slim, active incidents only --- */
+
+body.night-mode main {
+    grid-template-columns: 30% 70%;
+    grid-template-rows: minmax(0, 1fr) auto;
+}
+
+body.night-mode .watchlist {
+    padding: 6px 10px;
+    max-height: 15vh;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+
+body.night-mode .watchlist h2 {
+    font-size: 15px;
+    margin: 0;
+    white-space: nowrap;
+}
+
+body.night-mode #incident-log {
+    flex: 1;
+    min-width: 0;
+}
+
+body.night-mode .incident-panels {
+    grid-template-columns: 1fr;
+    margin-top: 0;
+}
+
+body.night-mode .incident-column:nth-child(2) {
+    display: none;
+}
+
+body.night-mode .incident-column {
+    padding: 6px 10px;
+    max-height: 13vh;
+}
+
+body.night-mode .incident-column h3 {
+    display: inline-block;
+    margin: 0 12px 0 0;
+    font-size: 14px;
+}
+
+body.night-mode .incident-empty {
+    display: inline-block;
+}
+
+/* --- Left panel: everything fits without scrolling --- */
+
+body.night-mode .weather {
+    gap: 6px;
+    font-size: 13px;
+}
+
+body.night-mode .weather h2 {
+    font-size: 16px;
+    margin-bottom: 0;
+}
+
+body.night-mode #weather-content {
+    margin-bottom: 0;
+}
+
+body.night-mode #weather-content > hr {
+    margin: 2px 0 !important;
+}
+
+/* ISS line spans the full width */
+body.night-mode #weather-content > p:last-child {
+    grid-column: 1 / -1;
+}
+
+/* Moon block: 2x2 facts beside a small picture */
+body.night-mode #weather-content > div > div {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2px 12px;
+    flex: 1;
+}
+
+body.night-mode #weather-content > div > img {
+    width: 52px !important;
+    height: 52px !important;
+}
+
+body.night-mode #night-aircraft-slot {
+    padding: 6px 0;
+}
+
+body.night-mode #night-aircraft-slot #aircraft-summary {
+    gap: 4px;
+    margin-bottom: 6px;
+}
+
+/* The radius is already shown in the header */
+body.night-mode #night-aircraft-slot #aircraft-summary .aircraft-stat:first-child {
+    display: none;
+}
+
+body.night-mode #night-aircraft-slot .aircraft-stat {
+    padding: 3px 6px;
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+body.night-mode #night-aircraft-slot #aircraft-map {
+    height: clamp(120px, 19vh, 190px);
+    min-height: 110px;
+}
+
+body.night-mode #local-alerts h3 {
+    font-size: 14px;
+    margin: 0 0 2px;
+}
+
+/* --- Filter bar / chips a little tighter --- */
+
+#astronomy-hud {
+    padding: 5px 8px;
+    gap: 5px;
+}

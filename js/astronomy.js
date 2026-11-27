@@ -6,6 +6,9 @@ let planetarium = null;
 let lastAstroLat = null;
 let lastAstroLon = null;
 let activeAstroFilter = "all";
+let astroView = "dome";          // "dome" (all-sky) or "horizon" (panoramic)
+let latestEvaluated = [];
+let applyViewRetries = 0;
 let selectedTargetId = null;
 let astroRefreshInterval = null;
 let latestIssPassSummary = null;
@@ -246,12 +249,15 @@ function computeEphemerisBody(bodyName, lat, lon, date) {
         const time = Astronomy.MakeTime(date);
         const equ = Astronomy.Equator(bodyName, time, observer, true, true);
         const hor = Astronomy.Horizon(time, observer, equ.ra, equ.dec, "normal");
+        const j2000 = Astronomy.Equator(bodyName, time, observer, false, true);
         const illum = Astronomy.Illumination(bodyName, time);
 
         return {
             az: normalizeDeg(hor.azimuth),
             alt: hor.altitude,
             visible: hor.altitude > 0,
+            raDeg: j2000.ra * 15,
+            decDeg: j2000.dec,
             mag: typeof illum.mag === "number" ? illum.mag : null
         };
     } catch (err) {
@@ -275,7 +281,9 @@ function getEvaluatedTargets(lat, lon) {
             alt: coords.alt,
             visible: coords.visible,
             compass: azToCompass8(coords.az),
-            extra: magText
+            extra: magText,
+            raDeg: eph ? eph.raDeg : undefined,
+            decDeg: eph ? eph.decDeg : undefined
         });
     }
 
@@ -322,9 +330,7 @@ function renderSkySelectorHud(lat, lon) {
     const aboveHorizon = filteredByCat.filter(item => item.visible);
     const displayList = aboveHorizon.length > 0 ? aboveHorizon : filteredByCat;
 
-    if (!selectedTargetId && displayList.length > 0) {
-        selectedTargetId = displayList[0].id;
-    }
+    latestEvaluated = evaluated;
 
     chipsContainer.innerHTML = displayList
         .map(item => {
@@ -356,17 +362,18 @@ function renderSkySelectorHud(lat, lon) {
         });
     });
 
-    const currentTarget =
-        evaluated.find(t => t.id === selectedTargetId) || displayList[0] || null;
+    const currentTarget = evaluated.find(t => t.id === selectedTargetId) || null;
 
     if (currentTarget) {
-        selectedTargetId = currentTarget.id;
         renderObservationBrief(currentTarget);
+        briefContainer.classList.add("has-target");
     } else {
-        briefContainer.innerHTML = `
-            <div class="astro-brief-empty">No targets available for this filter.</div>
-        `;
+        selectedTargetId = null;
+        briefContainer.classList.remove("has-target");
+        briefContainer.innerHTML = "";
     }
+
+    updateSkyNote();
 }
 
 function renderObservationBrief(target) {
@@ -380,7 +387,7 @@ function renderObservationBrief(target) {
     briefContainer.innerHTML = `
         <div class="astro-brief-header">
             <strong>${target.icon} ${target.name}</strong>
-            <span>${horizonNote}</span>
+            <span>${horizonNote} <button type="button" class="astro-brief-close" title="Show all">✕</button></span>
         </div>
         <div class="astro-brief-grid">
             <div><strong>Where to Look:</strong> ${target.whereToLook(target.az, target.alt, target.compass, target.extra)}</div>
@@ -390,38 +397,136 @@ function renderObservationBrief(target) {
 }
 
 function slewPlanetariumToTarget(target) {
-    if (!planetarium || !target) return;
+    // VirtualSky has no setAz(): azimuth is the az_off property (az option - 180).
+    if (!planetarium || !target || astroView !== "horizon") return;
 
-    const targetAz = normalizeDeg(target.az);
-    const targetAlt = Math.max(5, Math.min(80, target.alt));
+    planetarium.az_off = normalizeDeg(target.az) - 180;
+    planetarium.draw();
+}
 
-    try {
-        if (typeof planetarium.setAz === "function") {
-            planetarium.setAz(targetAz);
-        } else {
-            planetarium.az = targetAz;
-            if (typeof planetarium.draw === "function") {
-                planetarium.draw();
-            }
-        }
+const CONSTELLATION_ABBR = {
+    "orion": "Ori",
+    "taurus": "Tau",
+    "ursa-major": "UMa",
+    "cassiopeia": "Cas",
+    "cygnus": "Cyg"
+};
 
-        if (typeof planetarium.setEl === "function") {
-            planetarium.setEl(targetAlt);
-        }
-    } catch (err) {
-        console.log("[Astronomy] Slew adjustment fallback:", err);
+// Show only what the current filter / selection asks for.
+function applySkyView() {
+    const vs = planetarium;
+    if (!vs || !vs.constellation) return;
+
+    const sel = latestEvaluated.find(t => t.id === selectedTargetId) || null;
+
+    let stars = false;
+    let planets = false;
+    let lines = false;
+
+    if (sel) {
+        lines = sel.category === "constellation";
+    } else if (activeAstroFilter === "all") {
+        stars = planets = lines = true;
+    } else if (activeAstroFilter === "planet") {
+        planets = true;
+    } else if (activeAstroFilter === "constellation") {
+        lines = true;
     }
+
+    vs.showstars = stars;
+    vs.showstarlabels = stars;
+    vs.showplanets = planets;
+    vs.showplanetlabels = planets;
+    vs.constellation.lines = lines;
+    vs.constellation.labels = lines;
+
+    // Keep a copy of the full constellation list so we can narrow it to one
+    if (!vs._allLines && Array.isArray(vs.lines)) {
+        vs._allLines = vs.lines;
+    }
+
+    if (vs._allLines) {
+        vs.lines =
+            sel && sel.category === "constellation"
+                ? vs._allLines.filter(l => l[0] === CONSTELLATION_ABBR[sel.id])
+                : vs._allLines;
+        applyViewRetries = 0;
+    } else if (lines && applyViewRetries < 10) {
+        // constellation data still downloading; try again shortly
+        applyViewRetries++;
+        setTimeout(applySkyView, 500);
+    }
+
+    // Single marker for a selected planet / Moon
+    vs.pointers = [];
+    if (
+        sel &&
+        sel.category === "planet" &&
+        Number.isFinite(sel.raDeg) &&
+        Number.isFinite(sel.decDeg)
+    ) {
+        vs.addPointer({
+            ra: sel.raDeg,
+            dec: sel.decDeg,
+            label: sel.name,
+            colour: "#ffd000",
+            d: 10,
+            html: ""
+        });
+    }
+
+    vs.draw();
+}
+
+function updateSkyNote() {
+    const stage = document.getElementById("starmap-stage");
+    if (!stage) return;
+
+    let note = document.getElementById("astro-map-note");
+    if (!note) {
+        note = document.createElement("div");
+        note.id = "astro-map-note";
+        stage.appendChild(note);
+    }
+
+    const sel = latestEvaluated.find(t => t.id === selectedTargetId) || null;
+    const satelliteView =
+        (sel && sel.category === "satellite") ||
+        (!sel && activeAstroFilter === "satellite");
+
+    note.textContent = satelliteView
+        ? "Satellites move too fast to plot here - see the pass details in the info panel"
+        : "";
+    note.style.display = satelliteView ? "block" : "none";
 }
 
 function selectSkyTarget(target, shouldSlew = false) {
-    selectedTargetId = target.id;
+    // Tapping the selected item again goes back to showing the whole category
+    selectedTargetId = selectedTargetId === target.id ? null : target.id;
+
     if (typeof currentLat === "number" && typeof currentLon === "number") {
         renderSkySelectorHud(currentLat, currentLon);
-    } else {
-        renderObservationBrief(target);
     }
-    if (shouldSlew) {
+
+    applySkyView();
+
+    if (shouldSlew && selectedTargetId) {
         slewPlanetariumToTarget(target);
+    }
+}
+
+function setAstroView(view) {
+    astroView = view === "horizon" ? "horizon" : "dome";
+
+    const btn = document.getElementById("astro-view-btn");
+    if (btn) {
+        btn.textContent = astroView === "dome" ? "🌐 Dome view" : "🏞️ Horizon view";
+    }
+
+    if (planetarium && typeof planetarium.selectProjection === "function") {
+        planetarium.selectProjection(astroView === "dome" ? "polar" : "stereo");
+        planetarium.az_off = 0;
+        planetarium.draw();
     }
 }
 
@@ -430,28 +535,61 @@ function bindAstroHudEvents() {
     if (!hud || hud.dataset.bound === "true") return;
     hud.dataset.bound = "true";
 
-    hud.querySelectorAll(".astro-filter-btn").forEach(btn => {
+    // View toggle button (added here so index.html needs no change)
+    const bar = document.getElementById("astro-filter-bar");
+    if (bar && !document.getElementById("astro-view-btn")) {
+        const viewBtn = document.createElement("button");
+        viewBtn.type = "button";
+        viewBtn.id = "astro-view-btn";
+        viewBtn.className = "astro-filter-btn";
+        viewBtn.textContent = "🌐 Dome view";
+        viewBtn.addEventListener("click", () => {
+            setAstroView(astroView === "dome" ? "horizon" : "dome");
+        });
+        bar.appendChild(viewBtn);
+    }
+
+    hud.querySelectorAll("button[data-filter]").forEach(btn => {
         btn.addEventListener("click", () => {
             activeAstroFilter = btn.getAttribute("data-filter") || "all";
             selectedTargetId = null;
 
-            hud.querySelectorAll(".astro-filter-btn").forEach(b => b.classList.remove("active"));
+            hud.querySelectorAll("button[data-filter]").forEach(b => b.classList.remove("active"));
             btn.classList.add("active");
 
             if (typeof currentLat === "number" && typeof currentLon === "number") {
                 renderSkySelectorHud(currentLat, currentLon);
             }
+
+            applySkyView();
         });
     });
 
     const resetBtn = document.getElementById("astro-reset-view-btn");
     if (resetBtn) {
+        resetBtn.textContent = "🧭 Reset view";
         resetBtn.addEventListener("click", () => {
-            if (planetarium && typeof planetarium.setAz === "function") {
-                planetarium.setAz(180);
+            selectedTargetId = null;
+            if (typeof currentLat === "number" && typeof currentLon === "number") {
+                renderSkySelectorHud(currentLat, currentLon);
             }
+            if (planetarium) {
+                planetarium.az_off = 0;
+            }
+            applySkyView();
         });
     }
+
+    // Close button inside the info card (delegated, as the card is re-rendered)
+    document.addEventListener("click", e => {
+        if (e.target && e.target.classList && e.target.classList.contains("astro-brief-close")) {
+            selectedTargetId = null;
+            if (typeof currentLat === "number" && typeof currentLon === "number") {
+                renderSkySelectorHud(currentLat, currentLon);
+            }
+            applySkyView();
+        }
+    });
 }
 
 let astroInitRetries = 0;
@@ -482,6 +620,28 @@ function watchStarmapSize(el) {
     starmapObserver.observe(el);
 }
 
+// Wrap the map in a stage so the info card can sit on top of it, and so the
+// map can fill all the space the controls don't use.
+function ensureStarmapStage() {
+    let stage = document.getElementById("starmap-stage");
+    if (stage) return stage;
+
+    const el = document.getElementById("starmap");
+    if (!el || !el.parentNode) return null;
+
+    stage = document.createElement("div");
+    stage.id = "starmap-stage";
+    el.parentNode.insertBefore(stage, el);
+    stage.appendChild(el);
+
+    const brief = document.getElementById("astro-brief");
+    if (brief) {
+        stage.appendChild(brief);
+    }
+
+    return stage;
+}
+
 function initOrUpdateAstronomy(lat, lon) {
     if (
         typeof lat !== "number" ||
@@ -493,6 +653,7 @@ function initOrUpdateAstronomy(lat, lon) {
     }
 
     bindAstroHudEvents();
+    ensureStarmapStage();
 
     const container = document.getElementById("astronomy-container");
     const starmapEl = document.getElementById("starmap");
@@ -551,7 +712,7 @@ function initOrUpdateAstronomy(lat, lon) {
 
     planetarium = S.virtualsky({
         id: "starmap",
-        projection: "stereo",
+        projection: astroView === "dome" ? "polar" : "stereo",
         latitude: lat,
         longitude: lon,
         clock: new Date(),
@@ -577,6 +738,8 @@ function initOrUpdateAstronomy(lat, lon) {
     });
 
     watchStarmapSize(starmapEl);
+    applySkyView();
+    updateSkyNote();
 
     if (!astroRefreshInterval) {
         astroRefreshInterval = setInterval(() => {

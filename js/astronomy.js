@@ -1,17 +1,13 @@
-(function silenceStuqueryXhrWarning() {
-    const origWarn = console.warn.bind(console);
-    console.warn = (...args) => {
-        const msg = args.map(String).join(" ");
-        if (msg.includes("XMLHttpRequestResponseType") || msg.includes("'script' is not a valid enum value")) {
-            return;
-        }
-        origWarn(...args);
-    };
-})();
-
 /* ==========================================================
    HOSAC ASTRONOMICAL INTELLIGENCE MODULE (PHASE 1)
    ========================================================== */
+
+const _origWarn = console.warn.bind(console);
+console.warn = (...args) => {
+    const text = args.map(String).join(" ");
+    if (text.includes("XMLHttpRequestResponseType") || text.includes("'script'")) return;
+    _origWarn(...args);
+};
 
 let planetarium = null;
 let lastAstroLat = null;

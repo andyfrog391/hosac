@@ -168,7 +168,15 @@ async function loadWeather() {
         let mode;
         let aircraftRadius;
 
-        if (now < sunset) {
+        if (now < sunrise) {
+
+            // Early morning, before today's sunrise
+            nextEvent = "Sunrise";
+            eventTime = sunrise;
+            mode = "NIGHT";
+            aircraftRadius = 75;
+
+        } else if (now < sunset) {
 
             nextEvent = "Sunset";
             eventTime = sunset;
@@ -177,6 +185,7 @@ async function loadWeather() {
 
         } else {
 
+            // After sunset: next sunrise is tomorrow
             nextEvent = "Sunrise";
 
             eventTime = new Date(sunrise);

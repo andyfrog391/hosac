@@ -29,8 +29,81 @@ let tileLayer = null;
 
 let homeMarker = null;
 
+let closestViewerActive = false;
+
 /* ------------------------------------------------------------------
-   Aircraft photo lookup & cache (Planespotters)
+   Callsign normalisation & ADSBDB aircraft enrichment
+   ------------------------------------------------------------------ */
+
+const ADSBDB_AIRCRAFT_API = "https://api.adsbdb.com/v0/aircraft";
+const adsbdbAircraftCache = new Map();
+
+function normalizeRouteLookupCallsign(rawCallsign) {
+    const cleaned = String(rawCallsign || "").trim().toUpperCase().replace(/\s+/g, "");
+    if (!cleaned) return null;
+
+    // Match 2-3 letter airline prefix + flight number (strip leading zeros on numeric part)
+    const match = cleaned.match(/^([A-Z]{2,3})0*([1-9][0-9]{0,3}[A-Z]{0,2})$/);
+    if (!match) return null;
+
+    return {
+        raw: cleaned,
+        prefix: match[1],
+        numberPart: match[2],
+        normalized: `${match[1]}${match[2]}`
+    };
+}
+
+function getRouteCacheKeys(ac) {
+    const keys = [];
+    const raw = String((ac && ac.flight) || "").trim().toUpperCase().replace(/\s+/g, "");
+    if (raw) keys.push(raw);
+
+    const parsed = normalizeRouteLookupCallsign(raw);
+    if (parsed && !keys.includes(parsed.normalized)) {
+        keys.push(parsed.normalized);
+    }
+    return keys;
+}
+
+async function fetchAdsbdbAircraft(ac) {
+    const hex = (ac && ac.hex) ? String(ac.hex).trim().toLowerCase() : "";
+    const callsign = (ac && ac.flight) ? String(ac.flight).trim().toUpperCase() : "";
+    if (!hex) return null;
+
+    if (adsbdbAircraftCache.has(hex)) {
+        return adsbdbAircraftCache.get(hex);
+    }
+
+    const query = callsign ? `?callsign=${encodeURIComponent(callsign)}` : "";
+    const url = `${ADSBDB_AIRCRAFT_API}/${encodeURIComponent(hex)}${query}`;
+
+    try {
+        const res = await fetch(url);
+        if (!res.ok) {
+            if (res.status === 404) adsbdbAircraftCache.set(hex, null);
+            return null;
+        }
+        const data = await res.json();
+        const info = data && data.response && data.response.aircraft ? data.response.aircraft : null;
+        if (info) {
+            adsbdbAircraftCache.set(hex, info);
+            if (!ac.r && info.registration) ac.r = info.registration;
+            if (!ac.t && info.icao_type) ac.t = info.icao_type;
+            if (!ac.desc && info.type) ac.desc = info.type;
+            if (!ac.ownOp && info.registered_owner) ac.ownOp = info.registered_owner;
+        } else {
+            adsbdbAircraftCache.set(hex, null);
+        }
+        return info;
+    } catch (err) {
+        console.log("[ADSBdb] Aircraft lookup error:", err);
+        return null;
+    }
+}
+
+/* ------------------------------------------------------------------
+   Aircraft photo lookup & cache (Planespotters + ADSBDB fallback)
    ------------------------------------------------------------------ */
 
 const PLANESPOTTERS_API = "https://api.planespotters.net/pub/photos";
@@ -85,7 +158,8 @@ async function fetchAircraftPhoto(ac) {
                         found: true,
                         imageUrl,
                         pageUrl: p.link || getPlanespottersSearchUrl(ac),
-                        photographer: p.photographer || null
+                        photographer: p.photographer || null,
+                        source: "Planespotters.net"
                     };
                     aircraftPhotoCache.set(cacheKey, result);
                     return result;
@@ -96,14 +170,40 @@ async function fetchAircraftPhoto(ac) {
         }
     }
 
+    // Fallback to ADSBDB aircraft photo fields if available
+    const metaInfo = await fetchAdsbdbAircraft(ac);
+    const fallbackImg = metaInfo && (metaInfo.url_photo || metaInfo.url_photo_thumbnail);
+    if (fallbackImg) {
+        const result = {
+            found: true,
+            imageUrl: fallbackImg,
+            pageUrl: getPlanespottersSearchUrl(ac),
+            photographer: null,
+            source: "ADSBdb"
+        };
+        aircraftPhotoCache.set(cacheKey, result);
+        return result;
+    }
+
     const notFound = {
         found: false,
         imageUrl: null,
         pageUrl: getPlanespottersSearchUrl(ac),
-        photographer: null
+        photographer: null,
+        source: null
     };
     aircraftPhotoCache.set(cacheKey, notFound);
     return notFound;
+}
+
+function getCachedRouteForAircraft(ac) {
+    const keys = getRouteCacheKeys(ac);
+    for (const k of keys) {
+        if (acxRouteCache.has(k) && acxRouteCache.get(k)) {
+            return acxRouteCache.get(k);
+        }
+    }
+    return null;
 }
 
 function buildPopupHtml(ac, actualDistance, isActiveIncident, photoState = "idle", photoData = null) {
@@ -116,6 +216,9 @@ function buildPopupHtml(ac, actualDistance, isActiveIncident, photoState = "idle
             </div>
         `;
     } else if (photoState === "loaded" && photoData && photoData.found && photoData.imageUrl) {
+        const creditText = photoData.photographer
+            ? `📷 ${photoData.photographer}`
+            : (photoData.source || "Planespotters.net");
         photoSection = `
             <div style="margin-top:8px;">
                 <a href="${photoData.pageUrl}" target="_blank" rel="noopener noreferrer">
@@ -126,7 +229,7 @@ function buildPopupHtml(ac, actualDistance, isActiveIncident, photoState = "idle
                     >
                 </a>
                 <div style="font-size:11px;display:flex;justify-content:space-between;gap:8px;align-items:center;">
-                    <span>${photoData.photographer ? `📷 ${photoData.photographer}` : "Planespotters.net"}</span>
+                    <span>${creditText}</span>
                     <a href="${photoData.pageUrl}" target="_blank" rel="noopener noreferrer" style="color:#4da6ff;font-weight:bold;">
                         View on Planespotters ↗
                     </a>
@@ -144,11 +247,18 @@ function buildPopupHtml(ac, actualDistance, isActiveIncident, photoState = "idle
         `;
     }
 
+    const cachedRoute = getCachedRouteForAircraft(ac);
+    const fromCode = cachedRoute && cachedRoute.from && cachedRoute.from.code ? cachedRoute.from.code : null;
+    const toCode = cachedRoute && cachedRoute.to && cachedRoute.to.code ? cachedRoute.to.code : null;
+    const routeLine = (fromCode || toCode)
+        ? `Route: <b>${fromCode || "—"} → ${toCode || "—"}</b><br>`
+        : "";
+
     return `
         <div style="min-width:210px;max-width:250px;">
             <b>${ac.flight || ac.hex}</b><br>
 
-            Registration:
+            ${routeLine}Registration:
             ${ac.r || "Unknown"}<br>
 
             Aircraft:
@@ -183,33 +293,52 @@ function buildPopupHtml(ac, actualDistance, isActiveIncident, photoState = "idle
 }
 
 /* ------------------------------------------------------------------
-   Full-screen aircraft card (split-flap style)
-   Opens when an aircraft marker is clicked. Self-contained: injects
-   its own CSS and DOM. Live-updates while open.
+   Full-screen aircraft card (split-flap style + right-hand OVERHEAD board)
+   Opens when an aircraft marker, Closest chip, or Auto-Closest is triggered.
+   Self-contained: injects its own CSS and DOM. Live-updates while open.
    ------------------------------------------------------------------ */
 
 const ACX_AIRLINES = {
-    BAW: "British Airways", SHT: "British Airways Shuttle", EZY: "easyJet", EJU: "easyJet Europe",
-    RYR: "Ryanair", RUK: "Ryanair UK", VIR: "Virgin Atlantic", TOM: "TUI Airways", TUI: "TUI",
-    EXS: "Jet2", JBU: "JetBlue", UAL: "United Airlines", AAL: "American Airlines",
-    DAL: "Delta Air Lines", ACA: "Air Canada", WJA: "WestJet", KLM: "KLM", AFR: "Air France",
-    DLH: "Lufthansa", SWR: "Swiss", AUA: "Austrian", BEL: "Brussels Airlines", EIN: "Aer Lingus",
-    EWG: "Eurowings", UAE: "Emirates", QTR: "Qatar Airways", ETD: "Etihad", THY: "Turkish Airlines",
-    SAS: "SAS", FIN: "Finnair", IBE: "Iberia", VLG: "Vueling", TAP: "TAP Air Portugal",
-    WZZ: "Wizz Air", NOZ: "Norwegian", NAX: "Norwegian", ELY: "El Al", SIA: "Singapore Airlines",
-    CPA: "Cathay Pacific", ANA: "All Nippon Airways", JAL: "Japan Airlines", QFA: "Qantas",
-    ETH: "Ethiopian Airlines", SAA: "South African Airways", MSR: "EgyptAir", RAM: "Royal Air Maroc",
-    VOE: "Volotea", LOG: "Loganair", BCS: "European Air Charter", FDX: "FedEx", UPS: "UPS Airlines",
-    DHK: "DHL Air UK", GEC: "Lufthansa Cargo", CLX: "Cargolux", ICE: "Icelandair", AIC: "Air India",
-    PIA: "Pakistan International", KAL: "Korean Air", AAR: "Asiana", CCA: "Air China",
-    CSN: "China Southern", CES: "China Eastern", RJA: "Royal Jordanian", LOT: "LOT Polish",
-    CFE: "BA CityFlyer", EAF: "Eastern Airways", AEE: "Aegean", LDM: "Laudamotion"
+    BAW: "British Airways", BA: "British Airways", SHT: "British Airways Shuttle",
+    EZY: "easyJet", U2: "easyJet", EJU: "easyJet Europe", EC: "easyJet Europe",
+    RYR: "Ryanair", FR: "Ryanair", RUK: "Ryanair UK", RK: "Ryanair UK",
+    VIR: "Virgin Atlantic", VS: "Virgin Atlantic", TOM: "TUI Airways", BY: "TUI Airways", TUI: "TUI",
+    EXS: "Jet2", LS: "Jet2", JBU: "JetBlue", B6: "JetBlue",
+    UAL: "United Airlines", UA: "United Airlines", AAL: "American Airlines", AA: "American Airlines",
+    DAL: "Delta Air Lines", DL: "Delta Air Lines", ACA: "Air Canada", AC: "Air Canada",
+    WJA: "WestJet", WS: "WestJet", KLM: "KLM", KL: "KLM",
+    AFR: "Air France", AF: "Air France", DLH: "Lufthansa", LH: "Lufthansa",
+    SWR: "Swiss", LX: "Swiss", AUA: "Austrian", OS: "Austrian",
+    BEL: "Brussels Airlines", SN: "Brussels Airlines", EIN: "Aer Lingus", EI: "Aer Lingus",
+    EWG: "Eurowings", EW: "Eurowings", UAE: "Emirates", EK: "Emirates",
+    QTR: "Qatar Airways", QR: "Qatar Airways", ETD: "Etihad", EY: "Etihad",
+    THY: "Turkish Airlines", TK: "Turkish Airlines", SAS: "SAS", SK: "SAS",
+    FIN: "Finnair", AY: "Finnair", IBE: "Iberia", IB: "Iberia",
+    VLG: "Vueling", VY: "Vueling", TAP: "TAP Air Portugal", TP: "TAP Air Portugal",
+    WZZ: "Wizz Air", W6: "Wizz Air", NOZ: "Norwegian", DY: "Norwegian", NAX: "Norwegian",
+    ELY: "El Al", LY: "El Al", SIA: "Singapore Airlines", SQ: "Singapore Airlines",
+    CPA: "Cathay Pacific", CX: "Cathay Pacific", ANA: "All Nippon Airways", NH: "All Nippon Airways",
+    JAL: "Japan Airlines", JL: "Japan Airlines", QFA: "Qantas", QF: "Qantas",
+    ETH: "Ethiopian Airlines", ET: "Ethiopian Airlines", SAA: "South African Airways", SA: "South African Airways",
+    MSR: "EgyptAir", MS: "EgyptAir", RAM: "Royal Air Maroc", AT: "Royal Air Maroc",
+    VOE: "Volotea", V7: "Volotea", LOG: "Loganair", LM: "Loganair",
+    BCS: "European Air Charter", FDX: "FedEx", FX: "FedEx", UPS: "UPS Airlines", "5X": "UPS Airlines",
+    DHK: "DHL Air UK", GEC: "Lufthansa Cargo", CLX: "Cargolux", CV: "Cargolux",
+    ICE: "Icelandair", FI: "Icelandair", AIC: "Air India", AI: "Air India",
+    PIA: "Pakistan International", PK: "Pakistan International", KAL: "Korean Air", KE: "Korean Air",
+    AAR: "Asiana", OZ: "Asiana", CCA: "Air China", CA: "Air China",
+    CSN: "China Southern", CZ: "China Southern", CES: "China Eastern", MU: "China Eastern",
+    RJA: "Royal Jordanian", RJ: "Royal Jordanian", LOT: "LOT Polish", LO: "LOT Polish",
+    CFE: "BA CityFlyer", EAF: "Eastern Airways", T3: "Eastern Airways",
+    AEE: "Aegean", A3: "Aegean", LDM: "Laudamotion"
 };
 
 const acxRouteCache = new Map();
 let acxOpenId = null;
 let acxState = { photo: null, route: undefined, photoDone: false, routeDone: false };
 let acxClockTimer = null;
+let acxBoardPrefetchQueued = new Set();
+const acxPrevDistMap = new Map();
 
 function acxEsc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, c => (
@@ -223,9 +352,11 @@ function acxTitleCase(s) {
 }
 
 function acxAirlineName(ac) {
-    const cs = (ac.flight || "").trim().toUpperCase();
-    const prefix = cs.slice(0, 3);
-    if (/^[A-Z]{3}\d/.test(cs) && ACX_AIRLINES[prefix]) return ACX_AIRLINES[prefix];
+    const cs = (ac.flight || "").trim().toUpperCase().replace(/\s+/g, "");
+    const parsed = normalizeRouteLookupCallsign(cs);
+    if (parsed && ACX_AIRLINES[parsed.prefix]) return ACX_AIRLINES[parsed.prefix];
+    const prefix3 = cs.slice(0, 3);
+    if (/^[A-Z]{3}\d/.test(cs) && ACX_AIRLINES[prefix3]) return ACX_AIRLINES[prefix3];
     if (ac.ownOp) return acxTitleCase(ac.ownOp);
     return "";
 }
@@ -239,86 +370,100 @@ function acxPlanespottersGalleryUrl(ac) {
 }
 
 async function acxFetchRoute(ac) {
-    const callsign = (ac.flight || "").trim().toUpperCase();
-    if (!/^[A-Z]{3}[0-9]{1,4}[A-Z]{0,2}$/.test(callsign)) return null;
-    if (acxRouteCache.has(callsign)) return acxRouteCache.get(callsign);
+    const parsed = normalizeRouteLookupCallsign(ac && ac.flight);
+    if (!parsed) return null;
+
+    const keys = getRouteCacheKeys(ac);
+    for (const k of keys) {
+        if (acxRouteCache.has(k)) {
+            return acxRouteCache.get(k);
+        }
+    }
+
+    const candidates = [parsed.raw];
+    if (parsed.normalized !== parsed.raw) {
+        candidates.push(parsed.normalized);
+    }
 
     let result = null;
     let networkOk = false;
 
-    // 1) adsbdb.com (allows requests from web pages)
-    try {
-        const r = await fetch(`https://api.adsbdb.com/v0/callsign/${encodeURIComponent(callsign)}`);
-        if (r.ok) {
-            networkOk = true;
-            const d = await r.json();
-            const fr = d && d.response && d.response.flightroute;
-            if (fr && fr.origin && fr.destination) {
-                result = {
-                    from: {
-                        code: fr.origin.iata_code || fr.origin.icao_code,
-                        name: fr.origin.municipality || fr.origin.name
-                    },
-                    to: {
-                        code: fr.destination.iata_code || fr.destination.icao_code,
-                        name: fr.destination.municipality || fr.destination.name
-                    },
-                    airline: fr.airline && fr.airline.name ? fr.airline.name : ""
-                };
-            }
-        } else if (r.status === 404) {
-            networkOk = true; // reachable, just no route on file
-        }
-    } catch (err) {
-        console.log("[Card] adsbdb route error:", err);
-    }
-
-    // 2) hexdb.io fallback
-    if (!result) {
+    for (const cs of candidates) {
         try {
-            const r = await fetch(`https://hexdb.io/api/v1/route/icao/${encodeURIComponent(callsign)}`);
+            const r = await fetch(`https://api.adsbdb.com/v0/callsign/${encodeURIComponent(cs)}`);
             if (r.ok) {
                 networkOk = true;
                 const d = await r.json();
-                const parts = d && d.route ? String(d.route).split("-") : [];
-                if (parts.length >= 2) {
-                    const look = async icao => {
-                        try {
-                            const ar = await fetch(`https://hexdb.io/api/v1/airport/icao/${encodeURIComponent(icao)}`);
-                            if (!ar.ok) return { code: icao, name: "" };
-                            const ad = await ar.json();
-                            return {
-                                code: ad.iata || icao,
-                                name: (ad.airport || "").replace(/ (International|Intl\.?|Airport)\b/gi, "").trim()
-                            };
-                        } catch (e) { return { code: icao, name: "" }; }
+                const fr = d && d.response && d.response.flightroute;
+                if (fr && fr.origin && fr.destination) {
+                    result = {
+                        from: {
+                            code: fr.origin.iata_code || fr.origin.icao_code,
+                            name: fr.origin.municipality || fr.origin.name
+                        },
+                        to: {
+                            code: fr.destination.iata_code || fr.destination.icao_code,
+                            name: fr.destination.municipality || fr.destination.name
+                        },
+                        airline: fr.airline && fr.airline.name ? fr.airline.name : ""
                     };
-                    const [from, to] = await Promise.all([look(parts[0]), look(parts[parts.length - 1])]);
-                    result = { from, to };
+                    break;
                 }
+            } else if (r.status === 404) {
+                networkOk = true;
             }
         } catch (err) {
-            console.log("[Card] hexdb route error:", err);
+            console.log("[Card] adsbdb route error:", err);
         }
     }
 
-    if (result || networkOk) acxRouteCache.set(callsign, result);
+    if (!result) {
+        for (const cs of candidates) {
+            try {
+                const r = await fetch(`https://hexdb.io/api/v1/route/icao/${encodeURIComponent(cs)}`);
+                if (r.ok) {
+                    networkOk = true;
+                    const d = await r.json();
+                    const parts = d && d.route ? String(d.route).split("-") : [];
+                    if (parts.length >= 2) {
+                        const look = async icao => {
+                            try {
+                                const ar = await fetch(`https://hexdb.io/api/v1/airport/icao/${encodeURIComponent(icao)}`);
+                                if (!ar.ok) return { code: icao, name: "" };
+                                const ad = await ar.json();
+                                return {
+                                    code: ad.iata || icao,
+                                    name: (ad.airport || "").replace(/ (International|Intl\.?|Airport)\b/gi, "").trim()
+                                };
+                            } catch (e) { return { code: icao, name: "" }; }
+                        };
+                        const [from, to] = await Promise.all([look(parts[0]), look(parts[parts.length - 1])]);
+                        result = { from, to };
+                        break;
+                    }
+                }
+            } catch (err) {
+                console.log("[Card] hexdb route error:", err);
+            }
+        }
+    }
+
+    if (result || networkOk) {
+        keys.forEach(k => acxRouteCache.set(k, result));
+    }
     return result;
 }
 
 const ACX_HELI_CAPTIONS = {
-    // Typically air ambulance / police in the UK
     EC35: "Air ambulance / police helicopter", EC45: "Air ambulance / police helicopter",
     EC30: "Air ambulance / police helicopter", H135: "Air ambulance / police helicopter",
     H145: "Air ambulance / police helicopter", MBH5: "Air ambulance / police helicopter",
     BK17: "Air ambulance / police helicopter", A109: "Air ambulance / executive helicopter",
     A119: "Air ambulance / executive helicopter", B105: "Air ambulance / police helicopter",
-    // Search and rescue / offshore
     S92: "Search & rescue / offshore helicopter", S61: "Search & rescue helicopter",
     S61R: "Search & rescue helicopter", AS32: "Search & rescue / offshore helicopter",
     AS3B: "Search & rescue / offshore helicopter", A139: "Search & rescue / offshore helicopter",
     EC75: "Offshore / rescue helicopter",
-    // Training / light
     R22: "Light training helicopter", R44: "Light private helicopter", R66: "Light private helicopter",
     EN28: "Light private helicopter", EN48: "Light private helicopter",
     B06: "Light utility helicopter", B407: "Light utility helicopter", EC20: "Light utility helicopter",
@@ -330,7 +475,7 @@ function acxCaption(ac, callsign) {
     const military = typeof isMilitary === "function" && isMilitary(ac);
     const heli = typeof isHelicopter === "function" && isHelicopter(ac);
     const uav = typeof isUAV === "function" && isUAV(ac);
-    const airlineStyle = /^[A-Z]{3}[0-9]{1,4}[A-Z]{0,2}$/.test(callsign);
+    const airlineStyle = Boolean(normalizeRouteLookupCallsign(callsign));
 
     const service = typeof getEmergencyService === "function" ? getEmergencyService(ac) : null;
 
@@ -471,9 +616,36 @@ function acxInjectStyles() {
     s.id = "acx-styles";
     s.textContent = `
     #acx-overlay{position:fixed;inset:0;z-index:100000;background:#f6f6f3;color:#111;display:none;
-        flex-direction:column;padding:2.2vh 3.2vw;box-sizing:border-box;overflow:hidden;
+        flex-direction:row;gap:1.8vw;padding:2.2vh 2.6vw;box-sizing:border-box;overflow:hidden;
         font-family:"Helvetica Neue",Helvetica,Arial,sans-serif}
     #acx-overlay.open{display:flex}
+    #acx-overlay .acx-main{flex:2 1 0;min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+    #acx-overlay .acx-board{flex:1 1 0;min-width:0;min-height:0;background:#141310;color:#e7e2d3;
+        border-radius:12px;padding:18px 20px;display:flex;flex-direction:column;overflow:hidden;
+        box-shadow:0 10px 28px rgba(0,0,0,.22)}
+    #acx-overlay .acx-board-top{display:flex;justify-content:space-between;align-items:baseline;gap:10px;
+        border-bottom:2px solid #d4a72c;padding-bottom:10px;margin-bottom:12px}
+    #acx-overlay .acx-board-title{font-size:clamp(18px,2.2vw,28px);font-weight:800;letter-spacing:.12em;color:#e2b33b}
+    #acx-overlay .acx-board-meta{font-size:clamp(11px,1.15vw,14px);letter-spacing:.08em;color:#b8b19d;
+        text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    #acx-overlay .acx-board-cols{display:grid;grid-template-columns:1.35fr 0.9fr 0.72fr 0.72fr 0.95fr 0.68fr;gap:8px;
+        font-size:11px;font-weight:700;letter-spacing:.1em;color:#9d9684;padding:0 10px 8px;text-transform:uppercase}
+    #acx-overlay .acx-board-cols span:nth-child(5),
+    #acx-overlay .acx-board-cols span:nth-child(6){text-align:right}
+    #acx-overlay .acx-board-list{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:6px;padding-right:2px}
+    #acx-overlay .acx-board-row{display:grid;grid-template-columns:1.35fr 0.9fr 0.72fr 0.72fr 0.95fr 0.68fr;
+        align-items:center;gap:8px;width:100%;border:1px solid rgba(255,255,255,.05);background:#201e19;
+        color:#e7e2d3;border-radius:6px;padding:9px 10px;text-align:left;cursor:pointer;font-family:inherit;
+        font-size:clamp(12px,1.25vw,15px);transition:background .15s ease,border-color .15s ease}
+    #acx-overlay .acx-board-row:hover{background:#2a2720;border-color:rgba(226,179,59,.45)}
+    #acx-overlay .acx-board-row.active{background:#2d281b;border-color:#e2b33b}
+    #acx-overlay .acx-b-flt{font-weight:800;color:#e2b33b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    #acx-overlay .acx-b-typ,#acx-overlay .acx-b-apt{color:#d8d2c2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    #acx-overlay .acx-b-alt,#acx-overlay .acx-b-mi{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;color:#f1ede2}
+    #acx-overlay .acx-b-trend{display:inline-block;margin-left:4px;font-size:11px;font-weight:700}
+    #acx-overlay .acx-b-trend.closer{color:#4ade80}
+    #acx-overlay .acx-b-trend.further{color:#f87171}
+    #acx-overlay .acx-board-empty{color:#9d9684;font-size:13px;padding:18px 10px;text-align:center}
     #acx-overlay .acx-top{display:flex;justify-content:space-between;align-items:center;font-size:clamp(12px,1.6vw,18px);color:#555}
     #acx-overlay .acx-top .acx-right{display:flex;align-items:center;gap:16px}
     #acx-overlay .acx-close{border:0;background:#111;color:#fff;width:44px;height:44px;border-radius:50%;font-size:22px;cursor:pointer}
@@ -483,40 +655,56 @@ function acxInjectStyles() {
     .acx-fl i::after{content:"";position:absolute;left:0;right:0;top:50%;height:1px;background:rgba(0,0,0,.75)}
     .acx-fl i.flip{animation:acxflip .45s ease-out both}
     @keyframes acxflip{0%{transform:scaleY(.05)}60%{transform:scaleY(1.06)}100%{transform:scaleY(1)}}
-    .acx-big{font-size:clamp(48px,11vh,120px)}
-    .acx-med{font-size:clamp(28px,5.2vh,56px)}
-    .acx-stat{font-size:clamp(26px,5.4vh,56px)}
-    #acx-overlay .acx-row{display:flex;align-items:center;gap:2.2vw;margin-top:1.6vh}
+    .acx-big{font-size:clamp(44px,9.5vh,108px)}
+    .acx-med{font-size:clamp(26px,4.8vh,52px)}
+    .acx-stat{font-size:clamp(24px,5vh,52px)}
+    #acx-overlay .acx-row{display:flex;align-items:center;gap:2.2vw;margin-top:1.4vh}
     #acx-overlay .acx-arrow{font-size:clamp(28px,6vh,60px);line-height:1}
-    #acx-overlay .acx-names{display:flex;gap:2.2vw;font-weight:700;font-size:clamp(14px,2.4vh,26px);margin-top:.8vh}
-    #acx-overlay .acx-id{display:flex;align-items:center;gap:1.6vw;margin-top:1.6vh;font-size:clamp(13px,2.2vh,22px)}
-    #acx-overlay .acx-badges{display:flex;gap:10px;flex-wrap:wrap;margin-top:1vh}
-    #acx-overlay .acx-badge{padding:4px 12px;border-radius:999px;font-size:clamp(12px,1.9vh,18px);font-weight:700;background:#ddd}
+    #acx-overlay .acx-names{display:flex;gap:2.2vw;font-weight:700;font-size:clamp(14px,2.2vh,24px);margin-top:.6vh}
+    #acx-overlay .acx-id{display:flex;align-items:center;gap:1.6vw;margin-top:1.4vh;font-size:clamp(13px,2vh,21px)}
+    #acx-overlay .acx-badges{display:flex;gap:10px;flex-wrap:wrap;margin-top:.8vh}
+    #acx-overlay .acx-badge{padding:4px 12px;border-radius:999px;font-size:clamp(12px,1.8vh,17px);font-weight:700;background:#ddd}
     #acx-overlay .acx-badge.mil{background:#2f4f2f;color:#fff}
     #acx-overlay .acx-badge.emg{background:#c0182c;color:#fff}
     #acx-overlay .acx-badge.svc{background:#0f766e;color:#fff}
     #acx-overlay .acx-badge.gone{background:#555;color:#fff}
-    #acx-overlay .acx-photo{flex:1;min-height:0;margin:1.6vh 0;display:flex;align-items:center;justify-content:center;
+    #acx-overlay .acx-badge.auto{background:#0b57d0;color:#fff}
+    #acx-overlay .acx-photo{flex:1;min-height:0;margin:1.4vh 0;display:flex;align-items:center;justify-content:center;
         position:relative;border-radius:12px;background:#ebebe7;overflow:hidden}
     #acx-overlay .acx-photo img{max-width:100%;max-height:100%;object-fit:contain;display:block}
     #acx-overlay .acx-photo svg{width:70%;height:70%;color:#2a3b57;opacity:.85}
     #acx-overlay .acx-credit{position:absolute;left:10px;bottom:8px;font-size:12px;background:rgba(255,255,255,.8);padding:2px 8px;border-radius:6px}
     #acx-overlay .acx-note{position:absolute;right:10px;bottom:8px;font-size:12px;background:rgba(255,255,255,.8);padding:2px 8px;border-radius:6px;color:#444}
-    #acx-overlay .acx-stats{display:flex;align-items:center;gap:2.2vw;flex-wrap:wrap}
-    #acx-overlay .acx-unit{font-size:clamp(13px,2.2vh,22px);color:#555}
-    #acx-overlay .acx-compass{display:flex;align-items:center;gap:8px;margin-left:auto;font-weight:700;font-size:clamp(16px,3vh,30px)}
-    #acx-overlay .acx-compass svg{width:clamp(44px,8vh,80px);height:clamp(44px,8vh,80px)}
-    #acx-overlay .acx-btn{align-self:flex-start;margin-top:1.6vh;background:#0b57d0;color:#fff;text-decoration:none;
-        padding:12px 22px;border-radius:999px;font-weight:700;font-size:clamp(14px,2.2vh,20px)}
+    #acx-overlay .acx-stats{display:flex;align-items:center;gap:2vw;flex-wrap:wrap}
+    #acx-overlay .acx-unit{font-size:clamp(13px,2vh,20px);color:#555}
+    #acx-overlay .acx-compass{display:flex;align-items:center;gap:8px;margin-left:auto;font-weight:700;font-size:clamp(16px,2.8vh,28px)}
+    #acx-overlay .acx-compass svg{width:clamp(44px,7.5vh,76px);height:clamp(44px,7.5vh,76px)}
+    #acx-overlay .acx-btn{align-self:flex-start;margin-top:1.4vh;background:#0b57d0;color:#fff;text-decoration:none;
+        padding:11px 20px;border-radius:999px;font-weight:700;font-size:clamp(13px,2vh,19px)}
     #acx-overlay .acx-actions{display:flex;gap:12px;flex-wrap:wrap}
     #acx-overlay .acx-track{background:#111;border:0;cursor:pointer;font-family:inherit}
     #acx-overlay .acx-track.on{background:#c0182c}
+    @media (max-width: 820px){
+        #acx-overlay{flex-direction:column;overflow-y:auto;gap:14px}
+        #acx-overlay .acx-main{flex:none;overflow:visible}
+        #acx-overlay .acx-photo{min-height:180px;flex:none}
+        #acx-overlay .acx-board{flex:none;max-height:42vh}
+    }
     #acx-trackbar{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:1000;display:flex;align-items:center;
         gap:12px;background:rgba(17,24,39,.94);color:#fff;border:1px solid #00e5ff;border-radius:999px;padding:6px 8px 6px 16px;
         font-size:14px;max-width:94%;white-space:nowrap;box-shadow:0 2px 10px rgba(0,0,0,.5)}
     #acx-trackbar .acx-tb-text{overflow:hidden;text-overflow:ellipsis}
     #acx-trackbar .acx-tb-lost{color:#fbbf24;font-weight:700}
     #acx-trackbar button{background:#c0182c;color:#fff;border:0;border-radius:999px;padding:8px 16px;font-weight:700;cursor:pointer;font-size:14px}
+    #auto-closest-btn{background:#111827;color:#e5e7eb;border:1px solid #4da6ff;border-radius:6px;padding:6px 10px;
+        cursor:pointer;font-weight:bold;font-size:12px}
+    #auto-closest-btn:hover:not(:disabled){background:#1d4ed8;color:#fff}
+    #auto-closest-btn.active{background:#0b57d0;color:#fff;border-color:#93c5fd}
+    #auto-closest-btn:disabled{opacity:0.5;cursor:default}
+    #gps-refresh-btn.is-refreshing{opacity:0.75;transform:scale(0.96)}
+    body.night-mode #auto-closest-btn{border-color:#ff4d4d;color:#fecaca}
+    body.night-mode #auto-closest-btn:hover:not(:disabled),
+    body.night-mode #auto-closest-btn.active{background:#7f1d1d;color:#fff}
     `;
     document.head.appendChild(s);
 }
@@ -528,37 +716,54 @@ function acxEnsureOverlay() {
     el = document.createElement("div");
     el.id = "acx-overlay";
     el.innerHTML = `
-        <div class="acx-top">
-            <span id="acx-place"></span>
-            <span class="acx-right"><span id="acx-live"></span>
-            <button class="acx-close" id="acx-close" aria-label="Close">✕</button></span>
+        <div class="acx-main">
+            <div class="acx-top">
+                <span id="acx-place"></span>
+                <span class="acx-right"><span id="acx-live"></span>
+                <button class="acx-close" id="acx-close" aria-label="Close">✕</button></span>
+            </div>
+            <div class="acx-row">
+                <span class="acx-fl acx-big" id="acx-from"></span>
+                <span class="acx-arrow" id="acx-arrow">→</span>
+                <span class="acx-fl acx-big" id="acx-to"></span>
+            </div>
+            <div class="acx-names"><span id="acx-fromname"></span><span id="acx-toname" style="margin-left:auto"></span></div>
+            <div class="acx-id">
+                <span class="acx-fl acx-med" id="acx-flight"></span>
+                <span id="acx-desc"></span>
+            </div>
+            <div class="acx-badges" id="acx-badges"></div>
+            <div class="acx-photo" id="acx-photo"></div>
+            <div class="acx-stats">
+                <span class="acx-fl acx-stat" id="acx-alt"></span><span class="acx-unit" id="acx-altlabel"></span>
+                <span class="acx-fl acx-stat" id="acx-spd"></span>
+                <span class="acx-fl acx-stat" id="acx-dist"></span><span class="acx-unit">away</span>
+                <span class="acx-compass"><span id="acx-dir"></span>
+                    <svg viewBox="0 0 48 48"><circle cx="24" cy="24" r="17" fill="none" stroke="#111" stroke-width="2"/>
+                    <text x="24" y="8" font-size="9" text-anchor="middle" font-weight="700" fill="#111">N</text>
+                    <g id="acx-needle"><polygon points="24,10 29,26 24,23 19,26" fill="#111"/></g></svg>
+                </span>
+            </div>
+            <div class="acx-actions">
+                <a class="acx-btn" id="acx-link" target="_blank" rel="noopener noreferrer">View gallery on Planespotters ↗</a>
+                <button type="button" class="acx-btn acx-track" id="acx-track">🎯 Track on map</button>
+            </div>
         </div>
-        <div class="acx-row">
-            <span class="acx-fl acx-big" id="acx-from"></span>
-            <span class="acx-arrow" id="acx-arrow">→</span>
-            <span class="acx-fl acx-big" id="acx-to"></span>
-        </div>
-        <div class="acx-names"><span id="acx-fromname"></span><span id="acx-toname" style="margin-left:auto"></span></div>
-        <div class="acx-id">
-            <span class="acx-fl acx-med" id="acx-flight"></span>
-            <span id="acx-desc"></span>
-        </div>
-        <div class="acx-badges" id="acx-badges"></div>
-        <div class="acx-photo" id="acx-photo"></div>
-        <div class="acx-stats">
-            <span class="acx-fl acx-stat" id="acx-alt"></span><span class="acx-unit" id="acx-altlabel"></span>
-            <span class="acx-fl acx-stat" id="acx-spd"></span>
-            <span class="acx-fl acx-stat" id="acx-dist"></span><span class="acx-unit">away</span>
-            <span class="acx-compass"><span id="acx-dir"></span>
-                <svg viewBox="0 0 48 48"><circle cx="24" cy="24" r="17" fill="none" stroke="#111" stroke-width="2"/>
-                <text x="24" y="8" font-size="9" text-anchor="middle" font-weight="700" fill="#111">N</text>
-                <g id="acx-needle"><polygon points="24,10 29,26 24,23 19,26" fill="#111"/></g></svg>
-            </span>
-        </div>
-        <div class="acx-actions">
-            <a class="acx-btn" id="acx-link" target="_blank" rel="noopener noreferrer">View gallery on Planespotters ↗</a>
-            <button type="button" class="acx-btn acx-track" id="acx-track">🎯 Track on map</button>
-        </div>
+        <aside class="acx-board" aria-label="Overhead aircraft sorted closest to furthest">
+            <div class="acx-board-top">
+                <span class="acx-board-title">OVERHEAD</span>
+                <span class="acx-board-meta" id="acx-board-meta"></span>
+            </div>
+            <div class="acx-board-cols">
+                <span>FLIGHT</span>
+                <span>TYPE</span>
+                <span>FROM</span>
+                <span>TO</span>
+                <span>ALT FT</span>
+                <span>MI</span>
+            </div>
+            <div class="acx-board-list" id="acx-board-list"></div>
+        </aside>
     `;
     document.body.appendChild(el);
     el.querySelector("#acx-close").addEventListener("click", closeAircraftCard);
@@ -569,8 +774,109 @@ function acxEnsureOverlay() {
         else startAircraftTracking(id);
         closeAircraftCard();
     });
+    const boardList = el.querySelector("#acx-board-list");
+    if (boardList) {
+        boardList.addEventListener("click", e => {
+            const row = e.target.closest(".acx-board-row");
+            if (!row) return;
+            const id = row.dataset.id;
+            if (!id || !aircraftMetaCache.has(id)) return;
+            closestViewerActive = false;
+            syncAutoClosestButton();
+            openAircraftCard(id);
+        });
+    }
     document.addEventListener("keydown", e => { if (e.key === "Escape") closeAircraftCard(); });
     return el;
+}
+
+function acxRenderOverheadBoard() {
+    if (acxOpenId === null) return;
+    const listEl = document.getElementById("acx-board-list");
+    const metaEl = document.getElementById("acx-board-meta");
+    if (!listEl) return;
+
+    const place = (typeof currentLocationName !== "undefined" && currentLocationName)
+        ? String(currentLocationName).toUpperCase()
+        : "LOCAL SKY";
+    const d = new Date();
+    const clock = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+    if (metaEl) metaEl.textContent = `${place} · ${clock}`;
+
+    const entries = [];
+    aircraftMetaCache.forEach((meta, id) => {
+        if (!meta || !meta.ac || !Number.isFinite(meta.actualDistance)) return;
+        entries.push({ id, ac: meta.ac, dist: meta.actualDistance });
+    });
+
+    entries.sort((a, b) => a.dist - b.dist);
+
+    if (entries.length === 0) {
+        listEl.innerHTML = `<div class="acx-board-empty">No aircraft in range</div>`;
+        return;
+    }
+
+    const activeIds = new Set(entries.map(e => e.id));
+    acxPrevDistMap.forEach((_, prevId) => {
+        if (!activeIds.has(prevId)) acxPrevDistMap.delete(prevId);
+    });
+
+    listEl.innerHTML = entries.map(({ id, ac, dist }) => {
+        const flight = (ac.flight || "").trim().toUpperCase() || ac.r || String(ac.hex || "").toUpperCase() || "—";
+        const type = (ac.t || "—").toUpperCase();
+        const cachedRoute = getCachedRouteForAircraft(ac);
+        const fromCode = cachedRoute && cachedRoute.from && cachedRoute.from.code ? cachedRoute.from.code : "—";
+        const toCode = cachedRoute && cachedRoute.to && cachedRoute.to.code ? cachedRoute.to.code : "—";
+
+        let altStr = "—";
+        if (ac.alt_baro === "ground") {
+            altStr = "GND";
+        } else if (Number.isFinite(Number(ac.alt_baro))) {
+            altStr = Math.round(Number(ac.alt_baro)).toLocaleString("en-GB");
+        }
+
+        const prevDist = acxPrevDistMap.get(id);
+        let trendHtml = "";
+        if (typeof prevDist === "number" && Number.isFinite(prevDist)) {
+            const delta = dist - prevDist;
+            if (delta < -0.05) {
+                trendHtml = `<span class="acx-b-trend closer" title="Closing in">↓</span>`;
+            } else if (delta > 0.05) {
+                trendHtml = `<span class="acx-b-trend further" title="Moving away">↑</span>`;
+            }
+        }
+        acxPrevDistMap.set(id, dist);
+
+        const miStr = dist.toFixed(1);
+        const activeCls = id === acxOpenId ? " active" : "";
+
+        return `
+            <button type="button" class="acx-board-row${activeCls}" data-id="${acxEsc(id)}">
+                <span class="acx-b-flt">${acxEsc(flight)}</span>
+                <span class="acx-b-typ">${acxEsc(type)}</span>
+                <span class="acx-b-apt">${acxEsc(fromCode)}</span>
+                <span class="acx-b-apt">${acxEsc(toCode)}</span>
+                <span class="acx-b-alt">${acxEsc(altStr)}</span>
+                <span class="acx-b-mi">${acxEsc(miStr)}${trendHtml}</span>
+            </button>
+        `;
+    }).join("");
+
+    entries.slice(0, 12).forEach(({ ac }) => {
+        const keys = getRouteCacheKeys(ac);
+        const primaryKey = keys[0];
+        if (!primaryKey || !normalizeRouteLookupCallsign(primaryKey)) return;
+        const alreadyCached = keys.some(k => acxRouteCache.has(k));
+        if (!alreadyCached && !acxBoardPrefetchQueued.has(primaryKey)) {
+            acxBoardPrefetchQueued.add(primaryKey);
+            acxFetchRoute(ac).then(() => {
+                acxBoardPrefetchQueued.delete(primaryKey);
+                if (acxOpenId !== null) acxRenderOverheadBoard();
+            }).catch(() => {
+                acxBoardPrefetchQueued.delete(primaryKey);
+            });
+        }
+    });
 }
 
 function acxSetFlap(id, text) {
@@ -604,9 +910,12 @@ function acxRenderPhoto() {
     const ac = meta ? meta.ac : (acxState.lastAc || {});
     const p = acxState.photo;
     if (p && p.found && p.imageUrl) {
+        const creditParts = [];
+        if (p.photographer) creditParts.push("📷 " + acxEsc(p.photographer));
+        creditParts.push(acxEsc(p.source || "Planespotters.net"));
         box.innerHTML = `<a href="${acxEsc(p.pageUrl)}" target="_blank" rel="noopener noreferrer" style="display:contents">
             <img src="${acxEsc(p.imageUrl)}" alt="${acxEsc(ac.flight || ac.r || "Aircraft")}"></a>
-            <span class="acx-credit">${p.photographer ? "📷 " + acxEsc(p.photographer) + " · " : ""}Planespotters.net</span>`;
+            <span class="acx-credit">${creditParts.join(" · ")}</span>`;
     } else {
         box.innerHTML = acxSilhouette(ac) +
             `<span class="acx-note">${acxState.photoDone ? "No photo on Planespotters yet" : "Looking for a photo…"}</span>`;
@@ -625,7 +934,6 @@ function updateAircraftCard() {
     const reg = ac.r ? String(ac.r).toUpperCase() : "";
     const route = acxState.route;
 
-    // Route / identity
     if (route) {
         document.getElementById("acx-arrow").style.display = "";
         document.getElementById("acx-to").style.display = "";
@@ -649,8 +957,8 @@ function updateAircraftCard() {
     const desc = [airline, type, reg].filter(Boolean).join(", ");
     document.getElementById("acx-desc").textContent = desc || (ac.hex ? "ICAO " + String(ac.hex).toUpperCase() : "");
 
-    // Badges
     const badges = [];
+    if (closestViewerActive) badges.push(`<span class="acx-badge auto">📡 Closest Viewer</span>`);
     const svcLabel = typeof getEmergencyService === "function" ? getEmergencyService(ac) : null;
     if (svcLabel) badges.push(`<span class="acx-badge svc">🚨 ${acxEsc(svcLabel)}</span>`);
     if (typeof isMilitary === "function" && isMilitary(ac)) badges.push(`<span class="acx-badge mil">Military</span>`);
@@ -662,7 +970,6 @@ function updateAircraftCard() {
     if (gone) badges.push(`<span class="acx-badge gone">Out of range — last known position</span>`);
     document.getElementById("acx-badges").innerHTML = badges.join("");
 
-    // Stats
     const onGround = ac.alt_baro === "ground";
     const altNum = Number(ac.alt_baro);
     const vr = Number(ac.baro_rate !== undefined ? ac.baro_rate : ac.geom_rate);
@@ -692,6 +999,7 @@ function updateAircraftCard() {
         tb.style.display = gone ? "none" : "";
     }
     acxRenderPhoto();
+    acxRenderOverheadBoard();
 }
 
 function acxTickClock() {
@@ -699,6 +1007,7 @@ function acxTickClock() {
     if (!el) return;
     const d = new Date();
     el.textContent = "Live " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+    if (acxOpenId !== null) acxRenderOverheadBoard();
 }
 
 async function openAircraftCard(id) {
@@ -706,7 +1015,6 @@ async function openAircraftCard(id) {
     if (!meta) return;
     const el = acxEnsureOverlay();
 
-    // Reset state for a new aircraft
     if (acxOpenId !== id) {
         acxState = { photo: null, route: undefined, photoDone: false, routeDone: false, lastAc: meta.ac };
         ["acx-from", "acx-to", "acx-flight", "acx-alt", "acx-spd", "acx-dist"].forEach(k => {
@@ -726,6 +1034,13 @@ async function openAircraftCard(id) {
     updateAircraftCard();
 
     const ac = meta.ac;
+    if (!ac.r || !ac.desc) {
+        fetchAdsbdbAircraft(ac).then(info => {
+            if (acxOpenId !== id || !info) return;
+            updateAircraftCard();
+        }).catch(() => {});
+    }
+
     const cached = (typeof aircraftPhotoCache !== "undefined")
         ? aircraftPhotoCache.get(`${(ac.hex || "").trim().toLowerCase()}|${(ac.r || "").trim().toUpperCase()}`) : null;
     if (cached) { acxState.photo = cached; acxState.photoDone = true; }
@@ -741,6 +1056,7 @@ async function openAircraftCard(id) {
     routeP.then(r => {
         if (acxOpenId !== id) return;
         acxState.route = r; acxState.routeDone = true; updateAircraftCard();
+        acxRenderOverheadBoard();
     }).catch(() => { acxState.routeDone = true; });
 }
 
@@ -748,10 +1064,46 @@ function closeAircraftCard() {
     const el = document.getElementById("acx-overlay");
     if (el) el.classList.remove("open");
     acxOpenId = null;
+    closestViewerActive = false;
+    syncAutoClosestButton();
     clearInterval(acxClockTimer);
 }
 
+function getNearestAircraftId() {
+    let bestId = null;
+    let bestDist = Infinity;
+
+    aircraftMetaCache.forEach((meta, id) => {
+        if (!meta || !Number.isFinite(meta.actualDistance)) return;
+        if (meta.actualDistance <= currentAircraftRadius && meta.actualDistance < bestDist) {
+            bestDist = meta.actualDistance;
+            bestId = id;
+        }
+    });
+
+    return bestId;
+}
+
+function syncAutoClosestButton(hasTarget = Boolean(getNearestAircraftId())) {
+    const btn = document.getElementById("auto-closest-btn");
+    if (!btn) return;
+    btn.disabled = !hasTarget;
+    btn.classList.toggle("active", closestViewerActive && hasTarget);
+    btn.textContent = closestViewerActive ? "📡 Auto-Closest: ON" : "📡 Auto-Closest";
+}
+
+function openClosestAircraftViewer() {
+    const nearestId = getNearestAircraftId();
+    if (!nearestId) return;
+
+    closestViewerActive = true;
+    syncAutoClosestButton(true);
+    openAircraftCard(nearestId);
+}
+
 async function handleMarkerClick(id, marker) {
+    closestViewerActive = false;
+    syncAutoClosestButton();
     openAircraftCard(id);
 }
 
@@ -936,9 +1288,6 @@ function initialiseAircraftMap(lat, lon) {
 
     if (aircraftMap) {
 
-        // GPS updates arrive every few seconds. Move the home marker and radius
-        // circle with them, but never touch the user's zoom or pan -
-        // the Re-Centre button is the only thing that resets the view.
         if (homeMarker) {
             homeMarker.setLatLng([lat, lon]);
         }
@@ -1013,40 +1362,13 @@ function isMilitary(ac) {
             .toUpperCase();
 
     const militaryPrefixes = [
-
-        // RAF
-        "RRR",
-        "ASCOT",
-
-        // USAF
-        "RCH",
-        "REACH",
-        "QID",
-
-        // NATO
+        "RRR", "ASCOT",
+        "RCH", "REACH", "QID",
         "NATO",
-
-        // Canadian
         "CFC",
-
-        // Common military callsigns
-        "SHELL",
-        "TARTN",
-        "JAKE",
-        "CNV",
-        "HERKY",
-        "SPAR",
-        "GHOST",
-        "LAGR",
-        "VENUS",
-        "ROGUE",
-        "BLACKJACK",
-
-        "AME",
-        "DUKE",
-        "SHF",
-        "BAF",
-
+        "SHELL", "TARTN", "JAKE", "CNV", "HERKY", "SPAR",
+        "GHOST", "LAGR", "VENUS", "ROGUE", "BLACKJACK",
+        "AME", "DUKE", "SHF", "BAF"
     ];
 
     if (
@@ -1081,14 +1403,10 @@ function isMilitary(ac) {
 }
 
 const HELICOPTER_TYPES = new Set([
-
-    // UK / NATO military
     "EH10", "LYNX", "A159", "AW159", "H47", "H64", "H60", "H53", "H1",
     "S61", "S61R", "S58T", "S64", "S65", "PUMA", "GAZL", "LAMA",
     "ALO2", "ALO3", "TIGR", "NH90", "UH1", "HUEY", "V22",
     "AS32", "AS3B", "AS65", "AS55", "AS50", "AS53",
-
-    // Civil / emergency services
     "EC20", "EC25", "EC30", "EC35", "EC45", "EC55", "EC75", "EC60",
     "A109", "A119", "A139", "A149", "A169", "A189",
     "S76", "S92", "S70", "S300", "S333",
@@ -1096,10 +1414,7 @@ const HELICOPTER_TYPES = new Set([
     "B427", "B429", "B430", "B505", "B47G", "B47J", "B47T",
     "R22", "R44", "R66", "EN28", "EN48", "H269", "H500", "HUCO",
     "MD52", "MD60", "EXPL", "NOTR", "BK17", "G2CA", "KMAX",
-
-    // Russian / other
     "KA32", "KA27", "KA26", "MI2", "MI8", "MI14", "MI24", "MI26", "MI28"
-
 ]);
 
 const knownHelicopters = new Set();
@@ -1120,11 +1435,8 @@ function isHelicopter(ac) {
             .toUpperCase();
 
     const heli =
-
         ac.category === "A7" ||
-
         HELICOPTER_TYPES.has(type) ||
-
         /HELICOPTER|ROTORCRAFT|\bMERLIN\b|\bLYNX\b|\bWILDCAT\b|\bCHINOOK\b|\bAPACHE\b|\bPUMA\b|\bSEA ?KING\b/
             .test(desc);
 
@@ -1152,11 +1464,6 @@ function isEmergency(ac) {
     );
 
 }
-
-/* ------------------------------------------------------------------
-   Emergency services aircraft (police, air ambulance, coastguard, ...)
-   Detected from the callsign prefix or the registered operator name.
-   ------------------------------------------------------------------ */
 
 const EMERGENCY_SERVICE_CALLSIGNS = [
     ["POLICE", "Police"],
@@ -1273,11 +1580,9 @@ function buildIcon(ac, id = null) {
             ? aircraftHeadingState.get(id)
             : (ac.track || 0);
 
-
     const svg = helicopter
 
         ? `
-
         <svg viewBox="0 0 24 24"
             width="28"
             height="28">
@@ -1305,85 +1610,82 @@ function buildIcon(ac, id = null) {
                         rx="3.6"
                         ry="5.4"/>
 
-        </g>
+            </g>
 
-        <g stroke="#000000"
-           stroke-width="3.2"
-           stroke-linecap="round">
+            <g stroke="#000000"
+               stroke-width="3.2"
+               stroke-linecap="round">
 
-            <line x1="3"
-                y1="3"
-                x2="21"
-                y2="17"/>
+                <line x1="3"
+                    y1="3"
+                    x2="21"
+                    y2="17"/>
 
-            <line x1="21"
-                y1="3"
-                x2="3"
-                y2="17"/>
+                <line x1="21"
+                    y1="3"
+                    x2="3"
+                    y2="17"/>
 
-        </g>
+            </g>
 
-        <g stroke="${colour}"
-        stroke-width="1.5"
-        stroke-linecap="round">
+            <g stroke="${colour}"
+            stroke-width="1.5"
+            stroke-linecap="round">
 
-            <line x1="3"
-                y1="3"
-                x2="21"
-                y2="17"/>
+                <line x1="3"
+                    y1="3"
+                    x2="21"
+                    y2="17"/>
 
-            <line x1="21"
-                y1="3"
-                x2="3"
-                y2="17"/>
+                <line x1="21"
+                    y1="3"
+                    x2="3"
+                    y2="17"/>
 
-        </g>
+            </g>
 
-        <circle cx="12"
-                cy="10"
-                r="1.7"
-                fill="#000000"
-                stroke="${colour}"/>
+            <circle cx="12"
+                    cy="10"
+                    r="1.7"
+                    fill="#000000"
+                    stroke="${colour}"/>
 
-    </svg>
-`
+        </svg>
+        `
 
         : `
+        <svg viewBox="0 0 24 24"
+             width="32"
+             height="32">
 
-<svg viewBox="0 0 24 24"
-     width="32"
-     height="32">
-
-    <path
-        fill="${colour}"
-        stroke="#111111"
-        stroke-width="1.2"
-        stroke-linejoin="round"
-        d="
-            M21 16
-            v-2
-            l-8-5
-            V3.5
-            c0-.83-.67-1.5-1.5-1.5
-            S10 2.67 10 3.5
-            V9
-            l-8 5
-            v2
-            l8-2.5
-            V19
-            l-2 1.5
-            V22
-            l3.5-1
-            3.5 1
-            v-1.5
-            L13 19
-            v-5.5
-            l8 2.5
-            z"/>
-</svg>
-
-`;
-
+            <path
+                fill="${colour}"
+                stroke="#111111"
+                stroke-width="1.2"
+                stroke-linejoin="round"
+                d="
+                    M21 16
+                    v-2
+                    l-8-5
+                    V3.5
+                    c0-.83-.67-1.5-1.5-1.5
+                    S10 2.67 10 3.5
+                    V9
+                    l-8 5
+                    v2
+                    l8-2.5
+                    V19
+                    l-2 1.5
+                    V22
+                    l3.5-1
+                    3.5 1
+                    v-1.5
+                    L13 19
+                    v-5.5
+                    l8 2.5
+                    z"/>
+        </svg>
+        `;
 
     return L.divIcon({
 
@@ -1621,6 +1923,7 @@ async function loadAircraft() {
         let emergencyCount = 0;
         let closestMiles = Infinity;
         let closestName = "";
+        let closestId = null;
         let logChanged = false;
 
         aircraft.forEach(ac => {
@@ -1697,7 +2000,6 @@ async function loadAircraft() {
                 civilianCount++;
             }
 
-            // Squawk emergencies plus police / air ambulance / coastguard etc.
             if (isEmergency(ac) || getEmergencyService(ac)) {
 
                 emergencyCount++;
@@ -1710,6 +2012,7 @@ async function loadAircraft() {
             ) {
 
                 closestMiles = actualDistance;
+                closestId = id;
 
                 closestName =
                     (ac.flight || "").trim() ||
@@ -2004,7 +2307,13 @@ async function loadAircraft() {
                 emergencyCount;
         }
 
-        updateClosestChip(closestMiles, closestName);
+        updateClosestChip(closestMiles, closestName, closestId);
+
+        if (closestViewerActive && acxOpenId !== null && closestId && closestId !== acxOpenId) {
+            openAircraftCard(closestId);
+        } else if (acxOpenId !== null) {
+            acxRenderOverheadBoard();
+        }
 
     } catch (err) {
 
@@ -2021,10 +2330,11 @@ async function loadAircraft() {
 
 }
 
-// "Closest: 4.2 mi · BAW123" chip, created on first use so index.html needn't change
-function updateClosestChip(miles, name) {
+function updateClosestChip(miles, name, id = null) {
 
     let span = document.getElementById("closest-aircraft");
+    let chip = span ? span.closest(".aircraft-stat") : null;
+    let autoBtn = document.getElementById("auto-closest-btn");
 
     if (!span) {
 
@@ -2033,24 +2343,63 @@ function updateClosestChip(miles, name) {
 
         if (!summary) return;
 
-        const chip = document.createElement("div");
+        chip = document.createElement("div");
         chip.className = "aircraft-stat";
+        chip.title = "Click to open card for closest aircraft";
         chip.innerHTML = 'Closest: <span id="closest-aircraft">--</span>';
+
+        chip.addEventListener("click", () => {
+            const targetId = chip.dataset.aircraftId;
+            if (targetId && aircraftMetaCache.has(targetId)) {
+                closestViewerActive = false;
+                syncAutoClosestButton();
+                openAircraftCard(targetId);
+            }
+        });
+
+        autoBtn = document.createElement("button");
+        autoBtn.type = "button";
+        autoBtn.id = "auto-closest-btn";
+        autoBtn.textContent = "📡 Auto-Closest";
+        autoBtn.title = "Open closest aircraft card and automatically follow the nearest aircraft";
+        autoBtn.addEventListener("click", () => {
+            if (closestViewerActive && acxOpenId !== null) {
+                closeAircraftCard();
+            } else {
+                openClosestAircraftViewer();
+            }
+        });
 
         if (btn && btn.parentElement && btn.parentElement.parentElement === summary) {
             summary.insertBefore(chip, btn.parentElement);
+            summary.insertBefore(autoBtn, btn.parentElement);
         } else {
             summary.appendChild(chip);
+            summary.appendChild(autoBtn);
         }
 
         span = chip.querySelector("#closest-aircraft");
 
     }
 
+    const hasTarget = Number.isFinite(miles) && Boolean(id);
+
+    if (chip) {
+        chip.dataset.aircraftId = hasTarget ? id : "";
+        chip.style.cursor = hasTarget ? "pointer" : "default";
+        chip.style.opacity = hasTarget ? "1" : "0.75";
+    }
+
     span.textContent =
         Number.isFinite(miles)
             ? `${miles.toFixed(1)} mi${name ? " · " + name : ""}`
             : "--";
+
+    if (!hasTarget && closestViewerActive) {
+        closestViewerActive = false;
+    }
+
+    syncAutoClosestButton(hasTarget);
 
 }
 
@@ -2063,16 +2412,21 @@ function recenterMap() {
             "gps-refresh-btn"
         );
 
-    const BTN_LABEL = "📍 Re-Centre";
+    const BTN_ICON = "📍";
+    let resetBtnTimer = null;
 
-    const setBtn = (text, disabled) => {
+    const setBtn = (disabled, titleText, refreshing = false) => {
         if (!btn) return;
-        btn.textContent = text;
+        clearTimeout(resetBtnTimer);
+        btn.textContent = BTN_ICON;
         btn.disabled = !!disabled;
+        btn.classList.toggle("is-refreshing", !!refreshing);
+        if (titleText) {
+            btn.title = titleText;
+            btn.setAttribute("aria-label", titleText);
+        }
     };
 
-    // Move every map and panel to a position. Works the same in day and
-    // night mode (the aircraft map just lives in a different panel).
     const applyPosition = (lat, lon) => {
 
         currentLat = lat;
@@ -2110,7 +2464,6 @@ function recenterMap() {
 
     };
 
-    // 1) Instant response: recentre on the last known position straight away
     if (
         Number.isFinite(currentLat) &&
         Number.isFinite(currentLon)
@@ -2119,11 +2472,11 @@ function recenterMap() {
     }
 
     if (!navigator.geolocation) {
+        setBtn(false, "Re-Centre Map", false);
         return;
     }
 
-    // 2) Then refresh the GPS fix and recentre again if it has moved
-    setBtn("📍 Locating…", true);
+    setBtn(true, "Locating GPS position…", true);
 
     navigator.geolocation.getCurrentPosition(
 
@@ -2134,7 +2487,7 @@ function recenterMap() {
                 position.coords.longitude
             );
 
-            setBtn(BTN_LABEL, false);
+            setBtn(false, "Re-Centre Map", false);
 
         },
 
@@ -2145,10 +2498,10 @@ function recenterMap() {
                 error
             );
 
-            setBtn("⚠ No GPS fix", false);
+            setBtn(false, "No GPS fix — Re-Centre Map", false);
 
-            setTimeout(
-                () => setBtn(BTN_LABEL, false),
+            resetBtnTimer = setTimeout(
+                () => setBtn(false, "Re-Centre Map", false),
                 2500
             );
 
@@ -2163,7 +2516,6 @@ function recenterMap() {
     );
 
 }
-
 
 function saveIncidentLog() {
 

@@ -4,6 +4,111 @@ let rainFrames = [];
 let currentFrame = 0;
 let radarAnimation = null;
 let rainFrameTimes = [];
+let lastGoodWeatherData = null;
+
+const RAIN_ACTIVE_THRESHOLD_MM_HR = 0.3;
+const SHORT_DURATION_MINUTES = 5;
+const LONG_DURATION_CAP_MINUTES = 180; // ~3 hours max duration estimate
+const DISPLAY_MODE_STORAGE_KEY = "hosac_display_mode_pref";
+let currentDisplayModePref = "AUTO";
+
+const RAIN_WEATHER_CODES = new Set([
+    51, 53, 55, 56, 57,
+    61, 63, 65, 66, 67,
+    80, 81, 82,
+    95, 96, 99
+]);
+
+function isRainWeatherCode(code) {
+    return RAIN_WEATHER_CODES.has(Number(code));
+}
+
+function getDisplayMode() {
+    try {
+        const saved = localStorage.getItem(DISPLAY_MODE_STORAGE_KEY);
+        if (saved === "DAY" || saved === "NIGHT" || saved === "AUTO") {
+            currentDisplayModePref = saved;
+        }
+    } catch {
+        // Ignore storage errors
+    }
+    return currentDisplayModePref;
+}
+
+function setDisplayMode(pref) {
+    const normalized = (pref === "DAY" || pref === "NIGHT" || pref === "AUTO") ? pref : "AUTO";
+    currentDisplayModePref = normalized;
+    try {
+        localStorage.setItem(DISPLAY_MODE_STORAGE_KEY, normalized);
+    } catch {
+        // Ignore storage errors
+    }
+    syncModeSelectorButtons(normalized);
+    if (lastGoodWeatherData) {
+        applyModeOverride(lastGoodWeatherData);
+    } else {
+        loadWeather();
+    }
+}
+
+function syncModeSelectorButtons(pref) {
+    document.querySelectorAll("#display-mode-selector .mode-btn").forEach(btn => {
+        const isActive = btn.getAttribute("data-mode-pref") === pref;
+        btn.classList.toggle("active", isActive);
+    });
+}
+
+function bindDisplayModeSelector() {
+    const container = document.getElementById("display-mode-selector");
+    if (!container || container.dataset.bound === "true") return;
+    container.dataset.bound = "true";
+
+    syncModeSelectorButtons(getDisplayMode());
+
+    container.querySelectorAll(".mode-btn").forEach(btn => {
+        btn.addEventListener("click", () => {
+            const pref = btn.getAttribute("data-mode-pref") || "AUTO";
+            setDisplayMode(pref);
+        });
+    });
+}
+
+function applyModeOverride(data, now = new Date()) {
+    const sunrise = new Date(data.daily.sunrise[0]);
+    const sunset = new Date(data.daily.sunset[0]);
+
+    let nextEvent;
+    let eventTime;
+    let autoMode;
+
+    if (now < sunrise) {
+        nextEvent = "Sunrise";
+        eventTime = sunrise;
+        autoMode = "NIGHT";
+    } else if (now < sunset) {
+        nextEvent = "Sunset";
+        eventTime = sunset;
+        autoMode = "DAY";
+    } else {
+        nextEvent = "Sunrise";
+        eventTime = new Date(sunrise);
+        eventTime.setDate(eventTime.getDate() + 1);
+        autoMode = "NIGHT";
+    }
+
+    const pref = getDisplayMode();
+    const effectiveMode = pref === "AUTO" ? autoMode : pref;
+    const aircraftRadius = effectiveMode === "NIGHT" ? 75 : 50;
+
+    return {
+        pref,
+        mode: effectiveMode,
+        autoMode,
+        nextEvent,
+        eventTime,
+        aircraftRadius
+    };
+}
 
 function degreesToCompass(degrees) {
 
@@ -100,7 +205,387 @@ function moonPhaseImage(phase) {
 
 }
 
+function classifyRainRate(mmPerHour) {
+    if (mmPerHour >= 2.0) return "Heavy";
+    if (mmPerHour >= 0.5) return "Moderate";
+    if (mmPerHour >= RAIN_ACTIVE_THRESHOLD_MM_HR) return "Light";
+    return null;
+}
+
+function formatDurationPhrase(totalMinutes) {
+    if (totalMinutes < 60) {
+        const mins = Math.max(1, Math.round(totalMinutes));
+        return `${mins} min${mins === 1 ? "" : "s"}`;
+    }
+
+    const hours = Math.floor(totalMinutes / 60);
+    const remMins = Math.round((totalMinutes % 60) / 5) * 5;
+
+    if (remMins === 0) {
+        return `${hours} hour${hours === 1 ? "" : "s"}`;
+    }
+    if (remMins === 60) {
+        return `${hours + 1} hour${hours + 1 === 1 ? "" : "s"}`;
+    }
+
+    return `${hours}h ${remMins}m`;
+}
+
+function formatLongRainDetail(intensity, now) {
+    if (intensity === "Light") {
+        return "Persistent drizzle forecast";
+    }
+
+    if (now.getHours() < 12) {
+        return "Expected through the morning";
+    }
+
+    return "Expected for much of today";
+}
+
+function buildRainSeries(data, nowMs) {
+    if (
+        data.minutely_15 &&
+        Array.isArray(data.minutely_15.time) &&
+        Array.isArray(data.minutely_15.precipitation) &&
+        data.minutely_15.time.length > 0
+    ) {
+        const stepMinutes = 15;
+        const points = [];
+
+        for (let i = 0; i < data.minutely_15.time.length; i++) {
+            const tMs = new Date(data.minutely_15.time[i]).getTime();
+            const endMs = tMs + stepMinutes * 60000;
+            if (endMs <= nowMs) continue;
+
+            const rawMm = Math.max(0, Number(data.minutely_15.precipitation[i]) || 0);
+            points.push({
+                startMs: Math.max(tMs, nowMs),
+                endMs,
+                rateMmHr: rawMm * (60 / stepMinutes)
+            });
+        }
+
+        if (points.length > 0) {
+            return points;
+        }
+    }
+
+    if (
+        data.hourly &&
+        Array.isArray(data.hourly.time) &&
+        Array.isArray(data.hourly.precipitation)
+    ) {
+        const stepMinutes = 60;
+        const points = [];
+
+        for (let i = 0; i < data.hourly.time.length; i++) {
+            const tMs = new Date(data.hourly.time[i]).getTime();
+            const endMs = tMs + stepMinutes * 60000;
+            if (endMs <= nowMs) continue;
+
+            const rawMm = Math.max(0, Number(data.hourly.precipitation[i]) || 0);
+            points.push({
+                startMs: Math.max(tMs, nowMs),
+                endMs,
+                rateMmHr: rawMm
+            });
+        }
+
+        return points;
+    }
+
+    return [];
+}
+
+function evaluateRainForecast(data, now = new Date()) {
+    const nowMs = now.getTime();
+    const series = buildRainSeries(data, nowMs);
+    const codeIsRainy = isRainWeatherCode(data?.current_weather?.weathercode);
+
+    if (series.length === 0) {
+        if (codeIsRainy) {
+            return {
+                state: "ACTIVE",
+                intensity: "Light",
+                headline: "🌧 LIGHT RAIN",
+                detail: "Observed in current weather"
+            };
+        }
+        return {
+            state: "DRY",
+            intensity: null,
+            headline: "✅ DRY",
+            detail: "No rain expected"
+        };
+    }
+
+    const currentRate = series[0].rateMmHr;
+    const isActiveNow =
+        currentRate >= RAIN_ACTIVE_THRESHOLD_MM_HR ||
+        (codeIsRainy && currentRate > 0);
+
+    if (isActiveNow) {
+        const effectiveRate = Math.max(currentRate, RAIN_ACTIVE_THRESHOLD_MM_HR);
+        const intensity = classifyRainRate(effectiveRate) || "Light";
+        let endTimeMs = null;
+
+        // Require two consecutive low slots before declaring a break so brief lulls don't flicker
+        for (let i = 0; i < series.length; i++) {
+            const nextIsDry =
+                series[i].rateMmHr < RAIN_ACTIVE_THRESHOLD_MM_HR &&
+                (!series[i + 1] || series[i + 1].rateMmHr < RAIN_ACTIVE_THRESHOLD_MM_HR);
+            if (nextIsDry) {
+                endTimeMs = series[i].startMs;
+                break;
+            }
+        }
+
+        const remainingMinutes =
+            endTimeMs === null
+                ? LONG_DURATION_CAP_MINUTES
+                : Math.min(LONG_DURATION_CAP_MINUTES, Math.max(0, (endTimeMs - nowMs) / 60000));
+
+        const headlineIcon = intensity === "Light" ? "🌧" : "⚠";
+        const headline = `${headlineIcon} ${intensity.toUpperCase()} RAIN`;
+
+        if (remainingMinutes < SHORT_DURATION_MINUTES) {
+            return {
+                state: "ACTIVE",
+                intensity,
+                headline,
+                detail: "Rain ending shortly"
+            };
+        }
+
+        if (remainingMinutes >= LONG_DURATION_CAP_MINUTES) {
+            return {
+                state: "ACTIVE",
+                intensity,
+                headline,
+                detail: formatLongRainDetail(intensity, now)
+            };
+        }
+
+        const durationText = formatDurationPhrase(remainingMinutes);
+        if (intensity === "Light") {
+            return {
+                state: "ACTIVE",
+                intensity,
+                headline,
+                detail: `Rain ending in ${durationText}`
+            };
+        }
+
+        return {
+            state: "ACTIVE",
+            intensity,
+            headline,
+            detail: `Expected for next ${durationText}`
+        };
+    }
+
+    const maxLookAheadMs = nowMs + 6 * 60 * 60 * 1000;
+    for (let i = 0; i < series.length; i++) {
+        const pt = series[i];
+        if (pt.startMs > maxLookAheadMs) break;
+
+        if (pt.rateMmHr >= RAIN_ACTIVE_THRESHOLD_MM_HR) {
+            const minsUntilRain = Math.max(1, Math.round((pt.startMs - nowMs) / 60000));
+            return {
+                state: "APPROACHING",
+                intensity: null,
+                headline: "🌧 RAIN APPROACHING",
+                detail: `Arriving in ${formatDurationPhrase(minsUntilRain)}`
+            };
+        }
+    }
+
+    return {
+        state: "DRY",
+        intensity: null,
+        headline: "✅ DRY",
+        detail: "No rain expected"
+    };
+}
+
+function getNext2HourRainMetrics(data, now = new Date()) {
+    const nowMs = now.getTime();
+    const twoHoursMs = nowMs + 2 * 60 * 60 * 1000;
+    const weatherCode = Number(data?.current_weather?.weathercode);
+    const codeIsRainy = isRainWeatherCode(weatherCode);
+
+    let currentRateMmHr = 0;
+    let peakRateMmHr = 0;
+    let total2hMm = 0;
+
+    if (
+        data.minutely_15 &&
+        Array.isArray(data.minutely_15.time) &&
+        Array.isArray(data.minutely_15.precipitation)
+    ) {
+        const stepMs = 15 * 60000;
+        let seenCurrent = false;
+
+        for (let i = 0; i < data.minutely_15.time.length; i++) {
+            const startMs = new Date(data.minutely_15.time[i]).getTime();
+            const endMs = startMs + stepMs;
+            if (endMs <= nowMs) continue;
+            if (startMs >= twoHoursMs) break;
+
+            const mm15 = Math.max(0, Number(data.minutely_15.precipitation[i]) || 0);
+            const rateMmHr = mm15 * 4;
+
+            if (!seenCurrent) {
+                currentRateMmHr = rateMmHr;
+                seenCurrent = true;
+            }
+            if (rateMmHr > peakRateMmHr) {
+                peakRateMmHr = rateMmHr;
+            }
+            total2hMm += mm15;
+        }
+    } else if (
+        data.hourly &&
+        Array.isArray(data.hourly.time) &&
+        Array.isArray(data.hourly.precipitation)
+    ) {
+        const stepMs = 60 * 60000;
+        let seenCurrent = false;
+
+        for (let i = 0; i < data.hourly.time.length; i++) {
+            const startMs = new Date(data.hourly.time[i]).getTime();
+            const endMs = startMs + stepMs;
+            if (endMs <= nowMs) continue;
+            if (startMs >= twoHoursMs) break;
+
+            const hrMm = Math.max(0, Number(data.hourly.precipitation[i]) || 0);
+            if (!seenCurrent) {
+                currentRateMmHr = hrMm;
+                seenCurrent = true;
+            }
+            if (hrMm > peakRateMmHr) {
+                peakRateMmHr = hrMm;
+            }
+            const overlapStart = Math.max(startMs, nowMs);
+            const overlapEnd = Math.min(endMs, twoHoursMs);
+            const fraction = Math.max(0, (overlapEnd - overlapStart) / stepMs);
+            total2hMm += hrMm * fraction;
+        }
+    }
+
+    const isRainingNow =
+        currentRateMmHr >= RAIN_ACTIVE_THRESHOLD_MM_HR ||
+        (codeIsRainy && currentRateMmHr > 0);
+
+    let statusLabel;
+    let statusColour;
+
+    if (isRainingNow && peakRateMmHr >= 2.0) {
+        statusLabel = "HEAVY NOW";
+        statusColour = "#ef4444";
+    } else if (isRainingNow) {
+        statusLabel = "RAINING NOW";
+        statusColour = "#38bdf8";
+    } else if (peakRateMmHr >= 2.0) {
+        statusLabel = "HEAVY";
+        statusColour = "#ef4444";
+    } else if (peakRateMmHr >= 0.5) {
+        statusLabel = "LIKELY";
+        statusColour = "#f97316";
+    } else if (peakRateMmHr > 0 || (codeIsRainy && currentRateMmHr === 0)) {
+        statusLabel = "POSSIBLE";
+        statusColour = "#eab308";
+    } else {
+        statusLabel = "DRY";
+        statusColour = "#22c55e";
+    }
+
+    return {
+        isRainingNow,
+        currentRateMmHr,
+        peakRateMmHr,
+        total2hMm,
+        statusLabel,
+        statusColour
+    };
+}
+
+function getRainTheme(rainForecast) {
+    if (rainForecast.state === "APPROACHING") {
+        return {
+            label: "APPROACHING",
+            bg: "rgba(234, 179, 8, 0.14)",
+            badgeBg: "rgba(234, 179, 8, 0.22)",
+            color: "#eab308",
+            border: "rgba(234, 179, 8, 0.45)"
+        };
+    }
+
+    if (rainForecast.state === "ACTIVE") {
+        if (rainForecast.intensity === "Heavy") {
+            return {
+                label: "HEAVY",
+                bg: "rgba(239, 68, 68, 0.15)",
+                badgeBg: "rgba(239, 68, 68, 0.24)",
+                color: "#ef4444",
+                border: "rgba(239, 68, 68, 0.5)"
+            };
+        }
+        if (rainForecast.intensity === "Moderate") {
+            return {
+                label: "MODERATE",
+                bg: "rgba(249, 115, 22, 0.15)",
+                badgeBg: "rgba(249, 115, 22, 0.24)",
+                color: "#f97316",
+                border: "rgba(249, 115, 22, 0.5)"
+            };
+        }
+        return {
+            label: "LIGHT",
+            bg: "rgba(56, 189, 248, 0.14)",
+            badgeBg: "rgba(56, 189, 248, 0.22)",
+            color: "#38bdf8",
+            border: "rgba(56, 189, 248, 0.5)"
+        };
+    }
+
+    return {
+        label: "DRY",
+        bg: "rgba(34, 197, 94, 0.12)",
+        badgeBg: "rgba(34, 197, 94, 0.2)",
+        color: "#22c55e",
+        border: "rgba(34, 197, 94, 0.45)"
+    };
+}
+
+function formatRainBadge(rainForecast) {
+    const theme = getRainTheme(rainForecast);
+    return `<span class="rain-intel-badge" style="
+        background:${theme.badgeBg};
+        color:${theme.color};
+        border:1px solid ${theme.border};
+    ">${theme.label}</span>`;
+}
+
+function isValidWeatherPayload(data) {
+    return Boolean(
+        data &&
+        data.current_weather &&
+        typeof data.current_weather.winddirection === "number" &&
+        typeof data.current_weather.windspeed === "number" &&
+        typeof data.current_weather.temperature === "number" &&
+        data.hourly &&
+        Array.isArray(data.hourly.precipitation) &&
+        data.daily &&
+        Array.isArray(data.daily.sunrise) &&
+        Array.isArray(data.daily.sunset) &&
+        Array.isArray(data.daily.moon_phase)
+    );
+}
+
 async function loadWeather() {
+    bindDisplayModeSelector();
 
     if (!currentLat || !currentLon) {
         return;
@@ -111,6 +596,7 @@ async function loadWeather() {
     ?latitude=${currentLat}
     &longitude=${currentLon}
     &current_weather=true
+    &minutely_15=precipitation
     &hourly=relative_humidity_2m,cloud_cover,pressure_msl,apparent_temperature,precipitation
     &daily=sunrise,sunset,moonrise,moonset,moon_phase
     &timezone=auto`
@@ -118,8 +604,35 @@ async function loadWeather() {
 
     try {
 
-        const response = await fetch(url);
-        const data = await response.json();
+        let data = null;
+
+        try {
+            const response = await fetch(url);
+            const json = await response.json();
+
+            if (response.ok && isValidWeatherPayload(json)) {
+                data = json;
+                lastGoodWeatherData = json;
+                window.lastWeatherData = json;
+            } else {
+                console.warn(
+                    "Open-Meteo returned error or incomplete payload:",
+                    response.status,
+                    json
+                );
+            }
+        } catch (fetchError) {
+            console.warn("Open-Meteo fetch failed:", fetchError);
+        }
+
+        if (!data) {
+            if (lastGoodWeatherData) {
+                console.info("Using last cached Open-Meteo weather payload.");
+                data = lastGoodWeatherData;
+            } else {
+                return;
+            }
+        }
 
         const windDirection =
             degreesToCompass(
@@ -163,40 +676,8 @@ async function loadWeather() {
             });
 
         const now = new Date();
-
-        let nextEvent;
-        let eventTime;
-        let mode;
-        let aircraftRadius;
-
-        if (now < sunrise) {
-
-            // Early morning, before today's sunrise
-            nextEvent = "Sunrise";
-            eventTime = sunrise;
-            mode = "NIGHT";
-            aircraftRadius = 75;
-
-        } else if (now < sunset) {
-
-            nextEvent = "Sunset";
-            eventTime = sunset;
-            mode = "DAY";
-            aircraftRadius = 50;
-
-        } else {
-
-            // After sunset: next sunrise is tomorrow
-            nextEvent = "Sunrise";
-
-            eventTime = new Date(sunrise);
-            eventTime.setDate(
-                eventTime.getDate() + 1
-            );
-
-            mode = "NIGHT";
-            aircraftRadius = 75;
-        }
+        const modeInfo = applyModeOverride(data, now);
+        const { pref, mode, nextEvent, eventTime, aircraftRadius } = modeInfo;
 
         const eventTimeText =
             eventTime.toLocaleTimeString("en-GB", {
@@ -204,15 +685,16 @@ async function loadWeather() {
                 minute: "2-digit"
             });
 
+        const prefLabel = pref === "AUTO" ? "" : ` [${pref}]`;
         document.getElementById("mode").textContent =
-            `Mode: ${mode} · ${nextEvent} ${eventTimeText}`;
+            `Mode: ${mode}${prefLabel} · ${nextEvent} ${eventTimeText}`;
 
         document.getElementById(
             "weather-title"
         ).textContent =
             mode === "NIGHT"
                 ? "Sky Intelligence"
-                : "Weather";
+                : "Weather Intelligence";
 
         document.getElementById("radius").textContent =
             `Radius: ${aircraftRadius}mi`;
@@ -248,19 +730,6 @@ async function loadWeather() {
             );
         }
 
-        const difference =
-            eventTime - now;
-
-        const hours =
-            Math.floor(
-                difference / 1000 / 60 / 60
-            );
-
-        const minutes =
-            Math.floor(
-                (difference / 1000 / 60) % 60
-            );
-
         const weatherText =
             weatherCodeToText(
                 data.current_weather.weathercode
@@ -284,25 +753,13 @@ async function loadWeather() {
                 ) / 2 * 100
             );
 
-        let issInfo = "Loading...";
-
         const moonImage =
             moonPhaseImage(
                 data.daily.moon_phase[0]
             );
 
-        console.log(
-            "Moon phase raw:",
-            data.daily.moon_phase[0]
-        );
-
-        console.log(
-            "Moon image:",
-            moonImage
-        );
-
         const currentHour =
-            new Date().getHours();
+            now.getHours();
 
         const humidity =
             data.hourly.relative_humidity_2m[currentHour];
@@ -320,76 +777,31 @@ async function loadWeather() {
                 data.hourly.apparent_temperature[currentHour]
             );
 
-        const rainNext2Hours =
-            data.hourly.precipitation
-                .slice(
-                    currentHour,
-                    currentHour + 2
-                );
+        const rain2h = getNext2HourRainMetrics(data, now);
+        const maxRain = rain2h.total2hMm;
+        const rainRisk = rain2h.statusLabel;
+        const rainColour = rain2h.statusColour;
 
-        const maxRain =
-            Math.max(
-                ...rainNext2Hours
+        const rainForecast =
+            evaluateRainForecast(
+                data,
+                now
             );
 
-        let rainRisk;
+        const rainTheme =
+            getRainTheme(
+                rainForecast
+            );
 
-        if (maxRain >= 2) {
-
-            rainRisk = "HEAVY";
-
-        } else if (maxRain >= 0.5) {
-
-            rainRisk = "LIKELY";
-
-        } else if (maxRain > 0) {
-
-            rainRisk = "POSSIBLE";
-
-        } else {
-
-            rainRisk = "DRY";
-
-        }
-
-        let rainColour = "#22c55e";
-
-        if (rainRisk === "POSSIBLE") {
-            rainColour = "#eab308";
-        }
-
-        if (rainRisk === "LIKELY") {
-            rainColour = "#f97316";
-        }
-
-        if (rainRisk === "HEAVY") {
-            rainColour = "#ef4444";
-        }
-        let rainArrival =
-            "No rain expected";
-
-        for (let i = 0; i < 6; i++) {
-
-            if (
-                data.hourly.precipitation[
-                currentHour + i
-                ] > 0.2
-            ) {
-
-                rainArrival =
-                    `Approx ${i} hour${i !== 1 ? "s" : ""
-                    }`;
-
-                break;
-
-            }
-
-        }
+        const rainBadgeHtml =
+            formatRainBadge(
+                rainForecast
+            );
 
         let weatherAlert =
             "None";
 
-        if (maxRain >= 3) {
+        if (rain2h.peakRateMmHr >= 3.0) {
 
             weatherAlert =
                 "Heavy rain expected";
@@ -409,116 +821,57 @@ async function loadWeather() {
                 "Low cloud";
 
         }
-        const rainBars =
-            data.hourly.precipitation
-                .slice(currentHour, currentHour + 24)
-                .map(v => {
 
-                    if (v >= 3) return "█";
-                    if (v >= 1) return "▓";
-                    if (v >= 0.3) return "▒";
-                    if (v > 0) return "░";
+        const hasActiveWeatherAlert =
+            weatherAlert !== "None";
 
-                    return "·";
-
-                })
-                .join("");
-        try {
-
-            const issResponse =
-                await fetch(
-                    `https://iss-api.polluxlabs.io/iss-pass?lat=${currentLat}&lon=${currentLon}&n=1`
-                );
-
-            const issData =
-                await issResponse.json();
-
-            if (
-                issData.passes &&
-                issData.passes.length > 0
-            ) {
-
-                const pass =
-                    issData.passes[0];
-
-                const riseTime =
-                    new Date(
-                        pass.rise.time
-                    );
-
-                issInfo =
-                    `${riseTime.toLocaleTimeString(
-                        "en-GB",
-                        {
-                            hour: "2-digit",
-                            minute: "2-digit"
-                        }
-                    )} • ${Math.round(
-                        pass.duration_sec / 60
-                    )} mins`;
-
-            }
-
-        } catch {
-
-            issInfo = "Unavailable";
-
-        }
+        const windSpeedRounded =
+            Math.round(data.current_weather.windspeed);
 
         document.getElementById("weather-content").innerHTML = `
-            <p><strong>Condition:</strong> ${weatherText}</p>
-
-            <p><strong>Temperature:</strong>
-            ${data.current_weather.temperature}°C</p>
-
-            <p><strong>Feels Like:</strong>
-            ${feelsLike}°C</p>
-
-            <p><strong>Humidity:</strong>
-            ${humidity}%</p>
-
-            <p><strong>Cloud Cover:</strong>
-            ${cloudCover}%</p>
-
-            <p><strong>Pressure:</strong>
-            ${pressure} hPa</p>
-
-            <p><strong>Wind:</strong>
-            ${windDirection}
-            (${data.current_weather.winddirection}°)
-            ${data.current_weather.windspeed} km/h</p>
-
-           <p><strong>Rain Next 2h:</strong>
-            <span style="
-                color:${rainColour};
-                font-weight:bold;
+            <div class="weather-intel-hero" style="
+                background:${rainTheme.bg};
+                border:1px solid ${rainTheme.border};
+                border-left:4px solid ${rainTheme.color};
             ">
-            ${rainRisk}
-            </span>
-            (${maxRain.toFixed(1)} mm)
+                <div class="weather-intel-top">
+                    <span class="weather-intel-headline" style="color:${rainTheme.color};">
+                        ${rainForecast.headline}
+                    </span>
+                    ${rainBadgeHtml}
+                </div>
+                <div class="weather-intel-detail">${rainForecast.detail}</div>
+            </div>
+
+            <p class="weather-grid-item"><strong>Condition:</strong> ${weatherText}</p>
+            <p class="weather-grid-item"><strong>Temperature:</strong> ${data.current_weather.temperature}°C</p>
+
+            <p class="weather-grid-item"><strong>Feels Like:</strong> ${feelsLike}°C</p>
+            <p class="weather-grid-item"><strong>Wind:</strong> ${windDirection} (${data.current_weather.winddirection}°) ${windSpeedRounded} km/h</p>
+
+            <p class="weather-grid-item"><strong>Cloud Cover:</strong> ${cloudCover}%</p>
+            <p class="weather-grid-item"><strong>Rain Next 2h:</strong>
+                <span style="color:${rainColour};font-weight:bold;">${rainRisk}</span>
+                (${maxRain.toFixed(1)} mm)
             </p>
 
-            <p><strong>Rain Arrival:</strong>
-            ${rainArrival}</p>
+            <p class="weather-alert-row ${hasActiveWeatherAlert ? "is-active" : ""}">
+                <strong>Weather Alert:</strong> ${weatherAlert}
+            </p>
 
-            <p><strong>Weather Alert:</strong>
-            ${weatherAlert}</p>
+            <hr class="weather-divider">
 
-            <hr style="margin:10px 0;">
+            <p class="weather-grid-item weather-ref"><strong>Humidity:</strong> ${humidity}%</p>
+            <p class="weather-grid-item weather-ref"><strong>Pressure:</strong> ${pressure} hPa</p>
 
-            <p><strong>Sunrise:</strong> ${sunriseText}</p>
-
-            <p><strong>Sunset:</strong> ${sunsetText}</p>
+            <p class="weather-grid-item weather-ref"><strong>Sunrise:</strong> ${sunriseText}</p>
+            <p class="weather-grid-item weather-ref"><strong>Sunset:</strong> ${sunsetText}</p>
 
             ${mode === "NIGHT" ? `
 
-            <hr style="margin:10px 0;">
+            <hr class="weather-divider">
 
-            <div style="
-                display:flex;
-                justify-content:space-between;
-                align-items:center;
-            ">
+            <div class="weather-night-astro">
 
                 <div>
 
@@ -547,15 +900,19 @@ async function loadWeather() {
 
             </div>
 
-            <hr style="margin:10px 0;">
-
-            <p>
-            <strong>ISS Next Pass:</strong>
-            ${issInfo}
-            </p>
-
             ` : ""}
         `;
+
+        if (typeof renderTonightSummary === "function") {
+            renderTonightSummary({
+                mode,
+                cloudCover,
+                moonPhase,
+                moonIllumination,
+                lat: currentLat,
+                lon: currentLon
+            });
+        }
 
     } catch (error) {
 
@@ -602,8 +959,6 @@ function updateRainRadar() {
     }
 
 }
-
-setInterval(loadWeather, 60000);
 
 async function loadRainViewerLayer() {
 

@@ -332,6 +332,13 @@ function acxCaption(ac, callsign) {
     const uav = typeof isUAV === "function" && isUAV(ac);
     const airlineStyle = /^[A-Z]{3}[0-9]{1,4}[A-Z]{0,2}$/.test(callsign);
 
+    const service = typeof getEmergencyService === "function" ? getEmergencyService(ac) : null;
+
+    if (service) {
+        const kind = /flight$/i.test(service) ? "" : (heli ? " helicopter" : " aircraft");
+        return `🚨 ${service}${kind}${military ? " · Military" : ""}`;
+    }
+
     if (uav) return "Unmanned aircraft";
     if (military && heli) return "Military helicopter";
     if (military) return "Military aircraft";
@@ -487,6 +494,7 @@ function acxInjectStyles() {
     #acx-overlay .acx-badge{padding:4px 12px;border-radius:999px;font-size:clamp(12px,1.9vh,18px);font-weight:700;background:#ddd}
     #acx-overlay .acx-badge.mil{background:#2f4f2f;color:#fff}
     #acx-overlay .acx-badge.emg{background:#c0182c;color:#fff}
+    #acx-overlay .acx-badge.svc{background:#0f766e;color:#fff}
     #acx-overlay .acx-badge.gone{background:#555;color:#fff}
     #acx-overlay .acx-photo{flex:1;min-height:0;margin:1.6vh 0;display:flex;align-items:center;justify-content:center;
         position:relative;border-radius:12px;background:#ebebe7;overflow:hidden}
@@ -643,6 +651,8 @@ function updateAircraftCard() {
 
     // Badges
     const badges = [];
+    const svcLabel = typeof getEmergencyService === "function" ? getEmergencyService(ac) : null;
+    if (svcLabel) badges.push(`<span class="acx-badge svc">🚨 ${acxEsc(svcLabel)}</span>`);
     if (typeof isMilitary === "function" && isMilitary(ac)) badges.push(`<span class="acx-badge mil">Military</span>`);
     if (typeof isEmergency === "function" && isEmergency(ac)) {
         badges.push(`<span class="acx-badge emg">🚨 ${acxEsc(getEmergencyDescription(ac.squawk) || "Emergency")} · ${acxEsc(ac.squawk)}</span>`);
@@ -1143,6 +1153,62 @@ function isEmergency(ac) {
 
 }
 
+/* ------------------------------------------------------------------
+   Emergency services aircraft (police, air ambulance, coastguard, ...)
+   Detected from the callsign prefix or the registered operator name.
+   ------------------------------------------------------------------ */
+
+const EMERGENCY_SERVICE_CALLSIGNS = [
+    ["POLICE", "Police"],
+    ["NPAS", "Police"],
+    ["HELIMED", "Air ambulance"],
+    ["AIRAMB", "Air ambulance"],
+    ["AMBULANCE", "Air ambulance"],
+    ["MEDEVAC", "Medical flight"],
+    ["LIFEGUARD", "Medical flight"],
+    ["MEDIC", "Medical flight"],
+    ["RESCUE", "Rescue / SAR"],
+    ["RSCU", "Rescue / SAR"],
+    ["COASTGUARD", "Coastguard"],
+    ["CGUARD", "Coastguard"],
+    ["FIRE", "Fire service"]
+];
+
+const EMERGENCY_SERVICE_OPERATOR_RE =
+    /POLICE|NPAS|AMBULANCE|PARAMEDIC|HELIMED|MEDICAL|NHS|COAST ?GUARD|FIRE (AND|&) RESCUE|FIRE SERVICE|LIFEBOAT|RESCUE/i;
+
+function getEmergencyService(ac) {
+
+    const callsign =
+        (ac.flight || "")
+            .trim()
+            .toUpperCase();
+
+    if (callsign) {
+        for (const [prefix, label] of EMERGENCY_SERVICE_CALLSIGNS) {
+            if (callsign.startsWith(prefix)) {
+                return label;
+            }
+        }
+    }
+
+    const operator = String(ac.ownOp || "");
+
+    if (operator && EMERGENCY_SERVICE_OPERATOR_RE.test(operator)) {
+
+        if (/POLICE|NPAS/i.test(operator)) return "Police";
+        if (/AMBULANCE|PARAMEDIC|HELIMED|MEDICAL|NHS/i.test(operator)) return "Air ambulance";
+        if (/COAST ?GUARD/i.test(operator)) return "Coastguard";
+        if (/FIRE/i.test(operator)) return "Fire service";
+        if (/LIFEBOAT/i.test(operator)) return "Lifeboat / SAR";
+        return "Rescue / SAR";
+
+    }
+
+    return null;
+
+}
+
 function getEmergencyDescription(squawk) {
 
     switch (squawk) {
@@ -1188,14 +1254,19 @@ function buildIcon(ac, id = null) {
     const uav =
         isUAV(ac);
 
+    const service =
+        getEmergencyService(ac);
+
     const colour =
         emergency
             ? "#ffc107"
-            : military
-                ? "#ff4444"
-                : uav
-                    ? "#9c27b0"
-                    : "#4da6ff";
+            : service
+                ? "#00d68f"
+                : military
+                    ? "#ff4444"
+                    : uav
+                        ? "#9c27b0"
+                        : "#4da6ff";
 
     const initialHeading =
         id && aircraftHeadingState.has(id)
@@ -1548,6 +1619,8 @@ async function loadAircraft() {
         let militaryCount = 0;
         let civilianCount = 0;
         let emergencyCount = 0;
+        let closestMiles = Infinity;
+        let closestName = "";
         let logChanged = false;
 
         aircraft.forEach(ac => {
@@ -1624,9 +1697,24 @@ async function loadAircraft() {
                 civilianCount++;
             }
 
-            if (isEmergency(ac)) {
+            // Squawk emergencies plus police / air ambulance / coastguard etc.
+            if (isEmergency(ac) || getEmergencyService(ac)) {
 
                 emergencyCount++;
+
+            }
+
+            if (
+                actualDistance <= currentAircraftRadius &&
+                actualDistance < closestMiles
+            ) {
+
+                closestMiles = actualDistance;
+
+                closestName =
+                    (ac.flight || "").trim() ||
+                    ac.r ||
+                    "";
 
             }
 
@@ -1916,6 +2004,8 @@ async function loadAircraft() {
                 emergencyCount;
         }
 
+        updateClosestChip(closestMiles, closestName);
+
     } catch (err) {
 
         console.error(
@@ -1928,6 +2018,39 @@ async function loadAircraft() {
         loadingAircraft = false;
 
     }
+
+}
+
+// "Closest: 4.2 mi · BAW123" chip, created on first use so index.html needn't change
+function updateClosestChip(miles, name) {
+
+    let span = document.getElementById("closest-aircraft");
+
+    if (!span) {
+
+        const summary = document.getElementById("aircraft-summary");
+        const btn = document.getElementById("gps-refresh-btn");
+
+        if (!summary) return;
+
+        const chip = document.createElement("div");
+        chip.className = "aircraft-stat";
+        chip.innerHTML = 'Closest: <span id="closest-aircraft">--</span>';
+
+        if (btn && btn.parentElement && btn.parentElement.parentElement === summary) {
+            summary.insertBefore(chip, btn.parentElement);
+        } else {
+            summary.appendChild(chip);
+        }
+
+        span = chip.querySelector("#closest-aircraft");
+
+    }
+
+    span.textContent =
+        Number.isFinite(miles)
+            ? `${miles.toFixed(1)} mi${name ? " · " + name : ""}`
+            : "--";
 
 }
 

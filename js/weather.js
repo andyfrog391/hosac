@@ -3,6 +3,7 @@ let rainRadarLayers = [];
 let rainFrames = [];
 let currentFrame = 0;
 let radarAnimation = null;
+let rainFrameTimes = [];
 
 function degreesToCompass(degrees) {
 
@@ -594,6 +595,8 @@ function updateRainRadar() {
             rainRadarMap
         );
 
+        addRadarTimeControl();
+
         loadRainViewerLayer();
 
     }
@@ -603,6 +606,12 @@ function updateRainRadar() {
 setInterval(loadWeather, 60000);
 
 async function loadRainViewerLayer() {
+
+    // The radar map only exists once it has been created in day mode,
+    // so there is nothing to add layers to at night.
+    if (!rainRadarMap) {
+        return;
+    }
 
     try {
 
@@ -620,9 +629,21 @@ async function loadRainViewerLayer() {
                     `${data.host}${frame.path}/256/{z}/{x}/{y}/2/1_1.png`
             );
 
-        if (
-            rainRadarLayers.length === 0
-        ) {
+        rainFrameTimes =
+            data.radar.past.map(
+                frame => frame.time
+            );
+
+        // Replace the old frames with the newest ones, so the radar
+        // keeps up with the clock instead of freezing on the first load
+        {
+
+            rainRadarLayers.forEach(layer => {
+                rainRadarMap.removeLayer(layer);
+            });
+
+            rainRadarLayers = [];
+            currentFrame = 0;
 
             rainFrames.forEach(frameUrl => {
 
@@ -642,8 +663,12 @@ async function loadRainViewerLayer() {
 
             });
 
-            rainRadarLayers[0]
-                .setOpacity(0.65);
+            if (rainRadarLayers.length > 0) {
+                rainRadarLayers[0]
+                    .setOpacity(0.65);
+            }
+
+            updateRadarTimeLabel(0);
 
         }
 
@@ -661,6 +686,70 @@ async function loadRainViewerLayer() {
         );
 
     }
+
+}
+
+// Clock shown in the corner of the radar for the frame being displayed
+function updateRadarTimeLabel(index) {
+
+    const el = document.getElementById("radar-time");
+
+    if (!el || !rainFrameTimes[index]) {
+        return;
+    }
+
+    const when = new Date(rainFrameTimes[index] * 1000);
+
+    const clock =
+        when.toLocaleTimeString("en-GB", {
+            hour: "2-digit",
+            minute: "2-digit"
+        });
+
+    const minsAgo =
+        Math.round(
+            (Date.now() - when.getTime()) / 60000
+        );
+
+    const isLatest =
+        index === rainFrameTimes.length - 1;
+
+    el.textContent =
+        `🌧 ${clock}` +
+        (isLatest
+            ? " · latest"
+            : ` · ${minsAgo} min ago`);
+
+}
+
+function addRadarTimeControl() {
+
+    if (!rainRadarMap || document.getElementById("radar-time")) {
+        return;
+    }
+
+    const control = L.control({ position: "topright" });
+
+    control.onAdd = function () {
+
+        const div = L.DomUtil.create("div", "radar-time");
+
+        div.id = "radar-time";
+
+        div.style.cssText =
+            "background:rgba(17,24,39,0.88);" +
+            "color:#fff;" +
+            "padding:4px 10px;" +
+            "border-radius:6px;" +
+            "font:bold 13px Arial,sans-serif;" +
+            "border:1px solid #4da6ff;" +
+            "white-space:nowrap;";
+
+        return div;
+
+    };
+
+    control.addTo(rainRadarMap);
 
 }
 
@@ -696,6 +785,8 @@ function startRadarAnimation() {
             rainRadarLayers[
                 currentFrame
             ].setOpacity(0.65);
+
+            updateRadarTimeLabel(currentFrame);
 
         }, 450);
 

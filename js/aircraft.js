@@ -926,12 +926,15 @@ function initialiseAircraftMap(lat, lon) {
 
     if (aircraftMap) {
 
-        // Don't pull the map back home while following an aircraft
-        if (acxTrackedId === null) {
-            aircraftMap.setView(
-                [lat, lon],
-                9
-            );
+        // GPS updates arrive every few seconds. Move the home marker and radius
+        // circle with them, but never touch the user's zoom or pan -
+        // the Re-Centre button is the only thing that resets the view.
+        if (homeMarker) {
+            homeMarker.setLatLng([lat, lon]);
+        }
+
+        if (aircraftRadiusCircle) {
+            aircraftRadiusCircle.setLatLng([lat, lon]);
         }
 
         return;

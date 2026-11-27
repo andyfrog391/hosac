@@ -197,8 +197,14 @@ async function loadWeather() {
             aircraftRadius = 75;
         }
 
+        const eventTimeText =
+            eventTime.toLocaleTimeString("en-GB", {
+                hour: "2-digit",
+                minute: "2-digit"
+            });
+
         document.getElementById("mode").textContent =
-            `Mode: ${mode}`;
+            `Mode: ${mode} · ${nextEvent} ${eventTimeText}`;
 
         document.getElementById(
             "weather-title"
@@ -217,11 +223,16 @@ async function loadWeather() {
             aircraftRadius
         );
 
-        setMapTheme(
-            mode
-        );
+        // Any failure while redrawing the maps must not stop the weather panel
+        try {
+            setMapTheme(
+                mode
+            );
 
-        updateRainRadar();
+            updateRainRadar();
+        } catch (themeError) {
+            console.error("Map theme update failed", themeError);
+        }
 
         if (mode === "NIGHT") {
 
@@ -547,7 +558,7 @@ async function loadWeather() {
 
     } catch (error) {
 
-        console.log(error);
+        console.error("Weather load failed", error);
 
     }
 

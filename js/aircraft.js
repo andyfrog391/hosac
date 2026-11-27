@@ -1929,57 +1929,83 @@ function recenterMap() {
 
     stopAircraftTracking(false);
 
+    const btn =
+        document.getElementById(
+            "gps-refresh-btn"
+        );
+
+    const BTN_LABEL = "📍 Re-Centre";
+
+    const setBtn = (text, disabled) => {
+        if (!btn) return;
+        btn.textContent = text;
+        btn.disabled = !!disabled;
+    };
+
+    // Move every map and panel to a position. Works the same in day and
+    // night mode (the aircraft map just lives in a different panel).
+    const applyPosition = (lat, lon) => {
+
+        currentLat = lat;
+        currentLon = lon;
+
+        if (aircraftMap) {
+
+            aircraftMap.invalidateSize();
+
+            aircraftMap.setView(
+                [lat, lon],
+                9
+            );
+
+        }
+
+        if (aircraftRadiusCircle) {
+            aircraftRadiusCircle.setLatLng([lat, lon]);
+        }
+
+        if (homeMarker) {
+            homeMarker.setLatLng([lat, lon]);
+        }
+
+        if (typeof rainRadarMap !== "undefined" && rainRadarMap) {
+            rainRadarMap.invalidateSize();
+            rainRadarMap.setView([lat, lon], 7);
+        }
+
+        if (typeof initOrUpdateAstronomy === "function") {
+            initOrUpdateAstronomy(lat, lon);
+        }
+
+        loadAircraft();
+
+    };
+
+    // 1) Instant response: recentre on the last known position straight away
+    if (
+        Number.isFinite(currentLat) &&
+        Number.isFinite(currentLon)
+    ) {
+        applyPosition(currentLat, currentLon);
+    }
+
+    if (!navigator.geolocation) {
+        return;
+    }
+
+    // 2) Then refresh the GPS fix and recentre again if it has moved
+    setBtn("📍 Locating…", true);
+
     navigator.geolocation.getCurrentPosition(
 
         position => {
 
-            currentLat =
-                position.coords.latitude;
-
-            currentLon =
-                position.coords.longitude;
-
-            aircraftMap.setView(
-                [
-                    currentLat,
-                    currentLon
-                ],
-                9
+            applyPosition(
+                position.coords.latitude,
+                position.coords.longitude
             );
 
-            if (aircraftRadiusCircle) {
-
-                aircraftRadiusCircle.setLatLng([
-                    currentLat,
-                    currentLon
-                ]);
-
-            }
-
-            if (homeMarker) {
-
-                homeMarker.setLatLng([
-                    currentLat,
-                    currentLon
-                ]);
-
-            }
-
-            if (typeof initOrUpdateAstronomy === "function") {
-                initOrUpdateAstronomy(currentLat, currentLon);
-            }
-
-            if (typeof rainRadarMap !== "undefined" && rainRadarMap) {
-                rainRadarMap.setView(
-                    [
-                        currentLat,
-                        currentLon
-                    ],
-                    7
-                );
-            }
-
-            loadAircraft();
+            setBtn(BTN_LABEL, false);
 
         },
 
@@ -1990,11 +2016,25 @@ function recenterMap() {
                 error
             );
 
+            setBtn("⚠ No GPS fix", false);
+
+            setTimeout(
+                () => setBtn(BTN_LABEL, false),
+                2500
+            );
+
+        },
+
+        {
+            enableHighAccuracy: true,
+            timeout: 10000,
+            maximumAge: 30000
         }
 
     );
 
 }
+
 
 function saveIncidentLog() {
 

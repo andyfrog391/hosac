@@ -490,9 +490,25 @@ function renderSkySelectorHud(lat, lon) {
     }
 }
 
+function handleAstroCardImageError(imgEl, targetName, icon) {
+    if (!imgEl || imgEl.dataset.fallbackApplied === "true") return;
+    imgEl.dataset.fallbackApplied = "true";
+    console.warn("[Astronomy] Target image failed to load:", imgEl.getAttribute("src"));
+
+    const fallback = document.createElement("div");
+    fallback.className = "astro-card-img astro-card-img-fallback";
+    fallback.style.cssText =
+        "display:flex;flex-direction:column;align-items:center;justify-content:center;min-width:110px;min-height:90px;padding:8px;border-radius:6px;background:rgba(35,10,12,0.85);border:1px solid rgba(255,77,77,0.35);color:#fca5a5;font-size:11px;text-align:center;gap:4px;";
+    fallback.innerHTML = `<span style="font-size:24px;line-height:1;">${icon}</span><span>${targetName}</span><span style="opacity:0.7;font-size:10px;">Image unavailable</span>`;
+    imgEl.replaceWith(fallback);
+}
+
 function renderObservationBrief(target) {
     const briefContainer = document.getElementById("astro-brief");
     if (!briefContainer || !target) return;
+
+    // Prevent vertical box jump/anchor shifting during content updates
+    briefContainer.style.overflowAnchor = "none";
 
     const altDisplay = `${Math.round(target.alt)}°`;
     const horizonNote = target.visible
@@ -500,8 +516,8 @@ function renderObservationBrief(target) {
         : `<span class="astro-status-low">○ ${target.visibilityRating}</span>`;
 
     const imgHtml = target.image
-        ? `<img class="astro-card-img" src="${target.image}" alt="${target.name}" onerror="this.style.display='none'">`
-        : "";
+        ? `<img class="astro-card-img" src="${target.image}" alt="${target.name}" style="display:block;flex-shrink:0;" onerror="handleAstroCardImageError(this, '${target.name.replace(/'/g, "\\'")}', '${target.icon}')">`
+        : `<div class="astro-card-img astro-card-img-fallback" style="display:flex;align-items:center;justify-content:center;min-width:110px;min-height:90px;font-size:24px;">${target.icon}</div>`;
 
     if (target.category === "constellation") {
         briefContainer.innerHTML = `
@@ -509,7 +525,7 @@ function renderObservationBrief(target) {
                 <strong>${target.icon} ${target.name.toUpperCase()}</strong>
                 <span>${horizonNote} <button type="button" class="astro-brief-close" title="Close card">✕</button></span>
             </div>
-            <div class="astro-intel-card">
+            <div class="astro-intel-card" style="overflow-anchor:none;">
                 ${imgHtml}
                 <div class="astro-intel-rows">
                     <div><strong>Where to Look:</strong> ${target.directionFull} (${Math.round(target.az)}°, ${altDisplay})</div>
@@ -528,7 +544,7 @@ function renderObservationBrief(target) {
             <strong>${target.icon} ${target.name.toUpperCase()}</strong>
             <span>${horizonNote} <button type="button" class="astro-brief-close" title="Close card">✕</button></span>
         </div>
-        <div class="astro-intel-card">
+        <div class="astro-intel-card" style="overflow-anchor:none;">
             ${imgHtml}
             <div class="astro-intel-rows">
                 <div><strong>Direction:</strong> ${target.directionFull} (${Math.round(target.az)}°)</div>
@@ -723,7 +739,6 @@ function renderPhotographicSphere(ctx, cx, cy, r, centerLonDeg, centerLatDeg) {
     const sinCLat = Math.sin(cLat);
     const centerLonNorm = normalizeDeg(centerLonDeg);
 
-    // Draw horizontal latitude slices across the visible sphere for smooth 60fps orthographic mapping
     const stepPx = 2;
     const rInt = Math.floor(r);
 
@@ -735,7 +750,6 @@ function renderPhotographicSphere(ctx, cx, cy, r, centerLonDeg, centerLatDeg) {
         const maxX = Math.sqrt(maxXSq);
         const dstY = cy + dy;
 
-        // Sample longitude across [-maxX, +maxX]
         const cols = Math.max(12, Math.ceil(maxX * r * 0.45));
         for (let i = 0; i < cols; i++) {
             const nx0 = -maxX + (2 * maxX * i) / cols;
@@ -746,7 +760,6 @@ function renderPhotographicSphere(ctx, cx, cy, r, centerLonDeg, centerLatDeg) {
             if (nzSq <= 0) continue;
             const nz = Math.sqrt(nzSq);
 
-            // Inverse orthographic projection to (lat, lon)
             const sinLat = ny * cosCLat + nz * sinCLat;
             const latRad = Math.asin(Math.max(-1, Math.min(1, sinLat)));
             const cosLat = Math.cos(latRad) || 1e-6;
@@ -791,7 +804,6 @@ function drawRealisticGlobe(lat, lon) {
 
     ctx.clearRect(0, 0, w, h);
 
-    // Subtle crisp starfield
     ctx.fillStyle = "rgba(255, 225, 225, 0.48)";
     const starSeeds = [
         [0.07, 0.12, 1.1], [0.18, 0.82, 1.3], [0.27, 0.21, 0.9], [0.78, 0.16, 1.2],
@@ -803,7 +815,6 @@ function drawRealisticGlobe(lat, lon) {
         ctx.fill();
     }
 
-    // Subtle atmospheric glow
     const rimGlow = ctx.createRadialGradient(cx, cy, r * 0.96, cx, cy, r * 1.08);
     rimGlow.addColorStop(0, "rgba(255, 77, 77, 0.22)");
     rimGlow.addColorStop(1, "rgba(6, 8, 13, 0)");
@@ -817,17 +828,14 @@ function drawRealisticGlobe(lat, lon) {
     ctx.arc(cx, cy, r, 0, Math.PI * 2);
     ctx.clip();
 
-    // Base ocean fill
     ctx.fillStyle = "#0b1320";
     ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
 
     if (earthPhotoReady && earthPhotoCanvas) {
         renderPhotographicSphere(ctx, cx, cy, r, globeRotationLon, globePitchDeg);
-        // Night-mode warm/reddish photographic tint so it preserves night vision
         ctx.fillStyle = "rgba(38, 8, 10, 0.24)";
         ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
     } else {
-        // Vector continent fallback while texture loads or if offline
         for (const poly of GLOBE_CONTINENTS) {
             const projected = poly.map(([pLon, pLat]) =>
                 projectOrtho3D(pLat, pLon, globeRotationLon, globePitchDeg, cx, cy, r)
@@ -857,7 +865,6 @@ function drawRealisticGlobe(lat, lon) {
         }
     }
 
-    // Day/Night Terminator curve
     const terminatorPts = [];
     for (let step = 0; step <= 180; step += 3) {
         const bearing = step * DEG2RAD;
@@ -889,7 +896,6 @@ function drawRealisticGlobe(lat, lon) {
         ctx.setLineDash([]);
     }
 
-    // 3D spherical limb shading
     const sphereShade = ctx.createRadialGradient(
         cx - r * 0.28,
         cy - r * 0.28,
@@ -904,7 +910,6 @@ function drawRealisticGlobe(lat, lon) {
     ctx.fillStyle = sphereShade;
     ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
 
-    // Current GPS marker on the globe
     if (typeof lat === "number" && typeof lon === "number") {
         const gpsPt = projectOrtho3D(lat, lon, globeRotationLon, globePitchDeg, cx, cy, r);
         if (gpsPt.z > 0) {
@@ -923,14 +928,12 @@ function drawRealisticGlobe(lat, lon) {
 
     ctx.restore();
 
-    // Crisp outer limb stroke
     ctx.strokeStyle = "rgba(255, 77, 77, 0.65)";
     ctx.lineWidth = 1.6;
     ctx.beginPath();
     ctx.arc(cx, cy, r, 0, Math.PI * 2);
     ctx.stroke();
 
-    // Update geolocation readout inside the globe space
     const coordsEl = document.getElementById("globe-gps-readout");
     if (coordsEl) {
         const gpsStr =

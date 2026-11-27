@@ -25,6 +25,12 @@
 
         <div class="status-bar">
 
+            <div id="display-mode-selector" class="mode-selector" role="group" aria-label="Display Mode Selector">
+                <button type="button" class="mode-btn" data-mode-pref="DAY" title="Force Day Layout">☀ DAY</button>
+                <button type="button" class="mode-btn" data-mode-pref="NIGHT" title="Force Night Layout">🌙 NIGHT</button>
+                <button type="button" class="mode-btn active" data-mode-pref="AUTO" title="Automatic Sunrise/Sunset Mode">⚙ AUTO</button>
+            </div>
+
             <span id="gpsStatus">GPS: Waiting...</span>
 
             <span id="clock">Time: --:--</span>
@@ -57,6 +63,9 @@
                 Waiting for weather...
             </div>
 
+            <!-- NIGHT MODE: Tonight's Sky Summary -->
+            <div id="tonights-sky-panel" style="display: none;"></div>
+
             <!-- DAY MODE: Weather Radar -->
             <div id="rain-radar"></div>
 
@@ -83,7 +92,17 @@
 
         <div class="panel aircraft" id="right-main-panel">
 
-            <h2 id="right-panel-title">Aircraft Tracking</h2>
+            <div class="panel-header-row">
+                <h2 id="right-panel-title">Aircraft Tracking</h2>
+                <button
+                    type="button"
+                    id="gps-refresh-btn"
+                    title="Re-Centre Map"
+                    aria-label="Re-Centre Map"
+                >
+                    📍
+                </button>
+            </div>
 
             <!-- DAY MODE: Aircraft Summary & Map (Relocated to Left Panel in Night Mode) -->
             <div id="day-aircraft-slot">
@@ -98,24 +117,18 @@
                     </div>
 
                     <div class="aircraft-stat">
-                        Military:
+                        <span class="stat-label-full">Military:</span><span class="stat-label-short">Mil:</span>
                         <span id="military-count">0</span>
                     </div>
 
                     <div class="aircraft-stat">
-                        Emergency:
+                        <span class="stat-label-full">Emergency:</span><span class="stat-label-short">Emg:</span>
                         <span id="emergency-count">0</span>
                     </div>
 
                     <div class="aircraft-stat">
-                        Civilian:
+                        <span class="stat-label-full">Civilian:</span><span class="stat-label-short">Civ:</span>
                         <span id="civilian-count">0</span>
-                    </div>
-
-                    <div class="aircraft-stat">
-                        <button id="gps-refresh-btn">
-                            📍 Re-Centre
-                        </button>
                     </div>
 
                 </div>
@@ -137,7 +150,6 @@
                         <button type="button" class="astro-filter-btn active" data-filter="all">All Visible</button>
                         <button type="button" class="astro-filter-btn" data-filter="planet">Planets</button>
                         <button type="button" class="astro-filter-btn" data-filter="constellation">Constellations</button>
-                        <button type="button" class="astro-filter-btn" data-filter="satellite">Satellites</button>
                         <button type="button" id="astro-reset-view-btn" title="Reset horizon view to South">🧭 Reset 180°</button>
                     </div>
 
@@ -145,7 +157,7 @@
 
                     <div id="astro-brief">
                         <div class="astro-brief-empty">
-                            Select a visible planet, constellation, or satellite above to slew the sky chart and view observation guidance.
+                            Select a visible planet or constellation above to view observation guidance and intelligence cards.
                         </div>
                     </div>
                 </div>

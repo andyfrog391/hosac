@@ -38,6 +38,28 @@ let earthPhotoLoading = false;
 const DEG2RAD = Math.PI / 180;
 const RAD2DEG = 180 / Math.PI;
 
+function makeConstellationDiagram(title, stars, segments) {
+    const starCircles = stars
+        .map(([x, y, r = 3.2]) => `<circle cx="${x}" cy="${y}" r="${r}" fill="#ffd000"/>`)
+        .join("");
+    const lines = segments
+        .map(([x1, y1, x2, y2]) => `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#ff4d4d" stroke-width="1.6" stroke-linecap="round"/>`)
+        .join("");
+
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 140 100" width="140" height="100">
+        <rect width="140" height="100" rx="6" fill="#090c12" stroke="#5c1d1d" stroke-width="1.5"/>
+        <circle cx="22" cy="18" r="1" fill="#ff9999" opacity="0.55"/>
+        <circle cx="118" cy="22" r="1" fill="#ff9999" opacity="0.55"/>
+        <circle cx="30" cy="82" r="1" fill="#ff9999" opacity="0.5"/>
+        <circle cx="112" cy="78" r="1" fill="#ff9999" opacity="0.5"/>
+        ${lines}
+        ${starCircles}
+        <text x="70" y="94" text-anchor="middle" fill="#fca5a5" font-family="sans-serif" font-size="9" font-weight="bold">${title}</text>
+    </svg>`;
+
+    return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+}
+
 const EPHEMERIS_TARGETS = [
     {
         id: "moon",
@@ -113,7 +135,19 @@ const CONSTELLATION_TARGETS = [
         name: "Orion",
         category: "constellation",
         icon: "🏹",
-        image: "https://upload.wikimedia.org/wikipedia/commons/thumb/b/bf/Orion_IAU.svg/480px-Orion_IAU.svg.png",
+        image: makeConstellationDiagram(
+            "ORION",
+            [
+                [48, 20, 3.8], [92, 22, 4.2],
+                [63, 48, 3.0], [70, 50, 3.0], [77, 52, 3.0],
+                [46, 76, 4.2], [94, 74, 3.6]
+            ],
+            [
+                [48, 20, 92, 22], [48, 20, 63, 48], [92, 22, 77, 52],
+                [63, 48, 70, 50], [70, 50, 77, 52],
+                [63, 48, 46, 76], [77, 52, 94, 74], [46, 76, 94, 74]
+            ]
+        ),
         raDeg: 83.5,
         decDeg: 2.0,
         visibleFeatures: "Betelgeuse, Rigel, Orion Nebula",
@@ -125,7 +159,17 @@ const CONSTELLATION_TARGETS = [
         name: "Taurus",
         category: "constellation",
         icon: "🐂",
-        image: "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e9/Taurus_IAU.svg/480px-Taurus_IAU.svg.png",
+        image: makeConstellationDiagram(
+            "TAURUS",
+            [
+                [62, 54, 4.4], [52, 46, 2.6], [56, 62, 2.6],
+                [30, 22, 3.2], [96, 20, 3.2], [32, 34, 3.0]
+            ],
+            [
+                [52, 46, 62, 54], [56, 62, 62, 54], [52, 46, 56, 62],
+                [52, 46, 32, 34], [32, 34, 30, 22], [52, 46, 96, 20]
+            ]
+        ),
         raDeg: 74.0,
         decDeg: 18.5,
         visibleFeatures: "Aldebaran, Hyades, Pleiades",
@@ -137,7 +181,17 @@ const CONSTELLATION_TARGETS = [
         name: "Ursa Major / Plough",
         category: "constellation",
         icon: "🐻",
-        image: "https://upload.wikimedia.org/wikipedia/commons/thumb/1/13/Ursa_Major_IAU.svg/480px-Ursa_Major_IAU.svg.png",
+        image: makeConstellationDiagram(
+            "PLOUGH",
+            [
+                [32, 36, 3.6], [62, 34, 3.6], [66, 58, 3.4], [36, 60, 3.4],
+                [88, 52, 3.2], [108, 42, 3.2], [122, 28, 3.4]
+            ],
+            [
+                [32, 36, 62, 34], [62, 34, 66, 58], [66, 58, 36, 60], [36, 60, 32, 36],
+                [66, 58, 88, 52], [88, 52, 108, 42], [108, 42, 122, 28]
+            ]
+        ),
         raDeg: 165.0,
         decDeg: 56.0,
         visibleFeatures: "The Plough, Dubhe & Merak pointers, Mizar & Alcor",
@@ -149,7 +203,15 @@ const CONSTELLATION_TARGETS = [
         name: "Cassiopeia",
         category: "constellation",
         icon: "👑",
-        image: "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e7/Cassiopeia_IAU.svg/480px-Cassiopeia_IAU.svg.png",
+        image: makeConstellationDiagram(
+            "CASSIOPEIA",
+            [
+                [24, 32, 3.4], [48, 62, 3.4], [70, 40, 3.4], [94, 64, 3.4], [116, 28, 3.4]
+            ],
+            [
+                [24, 32, 48, 62], [48, 62, 70, 40], [70, 40, 94, 64], [94, 64, 116, 28]
+            ]
+        ),
         raDeg: 18.0,
         decDeg: 60.5,
         visibleFeatures: "Five-star 'W' asterism, Milky Way band, Double Cluster",
@@ -161,7 +223,16 @@ const CONSTELLATION_TARGETS = [
         name: "Cygnus",
         category: "constellation",
         icon: "🦢",
-        image: "https://upload.wikimedia.org/wikipedia/commons/thumb/3/38/Cygnus_IAU.svg/480px-Cygnus_IAU.svg.png",
+        image: makeConstellationDiagram(
+            "CYGNUS",
+            [
+                [70, 20, 4.0], [70, 45, 3.4], [70, 74, 3.2],
+                [34, 43, 3.2], [106, 47, 3.2]
+            ],
+            [
+                [70, 20, 70, 45], [70, 45, 70, 74], [34, 43, 70, 45], [70, 45, 106, 47]
+            ]
+        ),
         raDeg: 308.0,
         decDeg: 42.0,
         visibleFeatures: "Deneb, Albireo, Northern Cross",
@@ -521,13 +592,8 @@ function renderObservationBrief(target) {
         ? `<span class="astro-status-up">● ${target.visibilityRating}</span>`
         : `<span class="astro-status-low">○ ${target.visibilityRating}</span>`;
 
-    const imgStyle =
-        target.category === "constellation"
-            ? "display:block;flex-shrink:0;filter:invert(0.92) hue-rotate(180deg) saturate(1.4);"
-            : "display:block;flex-shrink:0;";
-
     const imgHtml = target.image
-        ? `<img class="astro-card-img" src="${target.image}" alt="${target.name}" style="${imgStyle}" onerror="handleAstroCardImageError(this, '${target.name.replace(/'/g, "\\'")}', '${target.icon}')">`
+        ? `<img class="astro-card-img" src="${target.image}" alt="${target.name}" style="display:block;flex-shrink:0;" onerror="handleAstroCardImageError(this, '${target.name.replace(/'/g, "\\'")}', '${target.icon}')">`
         : `<div class="astro-card-img astro-card-img-fallback" style="display:flex;align-items:center;justify-content:center;min-width:110px;min-height:90px;font-size:24px;">${target.icon}</div>`;
 
     if (target.category === "constellation") {

@@ -1,3 +1,14 @@
+(function silenceStuqueryXhrWarning() {
+    const origWarn = console.warn.bind(console);
+    console.warn = (...args) => {
+        const msg = args.map(String).join(" ");
+        if (msg.includes("XMLHttpRequestResponseType") || msg.includes("'script' is not a valid enum value")) {
+            return;
+        }
+        origWarn(...args);
+    };
+})();
+
 /* ==========================================================
    HOSAC ASTRONOMICAL INTELLIGENCE MODULE (PHASE 1)
    ========================================================== */
